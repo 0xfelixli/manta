@@ -17,7 +17,7 @@ A sleek Go CLI, TUI & macOS menu bar proxy manager powered by `mihomo` (Clash Me
 
 ## Install
 
-### Homebrew (macOS — Recommended, installs `mihomo` automatically)
+### Homebrew (macOS — Recommended, true single-binary with embedded `mihomo`)
 
 ```bash
 brew install 0xfelixli/tap/manta
@@ -26,14 +26,13 @@ brew install 0xfelixli/tap/manta
 ### Go Install
 
 ```bash
-brew install mihomo
 go install github.com/0xfelixli/manta/cmd/manta@latest
 ```
 
 ### Build from Source
 
 ```bash
-brew install go mihomo
+brew install go
 go mod tidy
 CGO_ENABLED=1 go build -o manta ./cmd/manta
 mkdir -p ~/.local/bin && rm -f ~/.local/bin/manta && cp manta ~/.local/bin/manta

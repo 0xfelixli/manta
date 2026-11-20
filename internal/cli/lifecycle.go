@@ -10,6 +10,7 @@ import (
 
 	"github.com/0xfelixli/manta/internal/api"
 	"github.com/0xfelixli/manta/internal/config"
+	"github.com/0xfelixli/manta/internal/core"
 	"github.com/0xfelixli/manta/internal/sysproxy"
 )
 
@@ -18,6 +19,8 @@ var (
 	upWithTun        bool
 	downWithSysProxy bool
 	statusWithIP     bool
+	daemonHomeDir    string
+	daemonConfigFile string
 )
 
 func init() {
@@ -25,7 +28,18 @@ func init() {
 	upCmd.Flags().BoolVar(&upWithTun, "tun", false, "Enable TUN virtual interface to capture all system & terminal traffic (requires sudo)")
 	downCmd.Flags().BoolVar(&downWithSysProxy, "sys", false, "Also disable macOS system proxy")
 	statusCmd.Flags().BoolVar(&statusWithIP, "ip", false, "Also query current exit IP and geolocation via the proxy")
-	rootCmd.AddCommand(initCmd, upCmd, downCmd, statusCmd, logsCmd)
+	daemonCmd.Flags().StringVarP(&daemonHomeDir, "dir", "d", "", "mihomo home directory")
+	daemonCmd.Flags().StringVarP(&daemonConfigFile, "file", "f", "", "mihomo runtime config file")
+	rootCmd.AddCommand(initCmd, upCmd, downCmd, statusCmd, logsCmd, daemonCmd)
+}
+
+var daemonCmd = &cobra.Command{
+	Use:    "_daemon",
+	Hidden: true,
+	Short:  "Internal embedded mihomo daemon runner",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return core.RunEmbeddedDaemon(daemonHomeDir, daemonConfigFile)
+	},
 }
 
 var initCmd = &cobra.Command{

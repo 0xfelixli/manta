@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -15,7 +14,7 @@ import (
 	"github.com/0xfelixli/manta/internal/config"
 )
 
-// Manager controls the mihomo background process lifecycle.
+// Manager controls the background proxy daemon lifecycle.
 type Manager struct {
 	Paths config.Paths
 	Cfg   *config.AppConfig
@@ -25,7 +24,7 @@ func NewManager(paths config.Paths, cfg *config.AppConfig) *Manager {
 	return &Manager{Paths: paths, Cfg: cfg}
 }
 
-// FindBinary locates the mihomo executable.
+// FindBinary returns the active engine description (embedded by default, or external core_bin if configured).
 func (m *Manager) FindBinary() (string, error) {
 	if m.Cfg.CoreBin != "" {
 		if _, err := os.Stat(m.Cfg.CoreBin); err == nil {
@@ -33,23 +32,11 @@ func (m *Manager) FindBinary() (string, error) {
 		}
 		return "", fmt.Errorf("configured core_bin not found: %s", m.Cfg.CoreBin)
 	}
-
-	if path, err := exec.LookPath("mihomo"); err == nil {
-		return path, nil
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("resolve manta executable: %w", err)
 	}
-
-	candidates := []string{
-		"/opt/homebrew/bin/mihomo",
-		"/usr/local/bin/mihomo",
-		filepath.Join(m.Paths.RootDir, "bin", "mihomo"),
-	}
-	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
-			return c, nil
-		}
-	}
-
-	return "", errors.New("mihomo binary not found (install via `brew install mihomo` or set core_bin in config.yaml)")
+	return fmt.Sprintf("%s (embedded mihomo %s)", exe, EmbeddedVersion()), nil
 }
 
 // ReadPID reads the stored PID from manta.pid.
@@ -65,9 +52,7 @@ func (m *Manager) ReadPID() (int, error) {
 	return pid, nil
 }
 
-// IsRunning checks whether the tracked mihomo process is alive.
-// Note: when mihomo was started with sudo (TUN mode), syscall.Kill(pid, 0)
-// from a non-root user returns EPERM, which still means the process exists.
+// IsRunning checks whether the tracked daemon process is alive.
 func (m *Manager) IsRunning() (bool, int) {
 	pid, err := m.ReadPID()
 	if err != nil {
@@ -80,15 +65,10 @@ func (m *Manager) IsRunning() (bool, int) {
 	return true, pid
 }
 
-// Start builds runtime.yaml, launches mihomo in the background, and waits for its controller API.
+// Start builds runtime.yaml, launches the embedded mihomo daemon in the background, and waits for its controller API.
 func (m *Manager) Start() (int, error) {
 	if running, pid := m.IsRunning(); running {
 		return pid, fmt.Errorf("manta is already running (pid %d)", pid)
-	}
-
-	bin, err := m.FindBinary()
-	if err != nil {
-		return 0, err
 	}
 
 	if err := config.BuildRuntimeConfig(m.Paths, m.Cfg); err != nil {
@@ -101,13 +81,26 @@ func (m *Manager) Start() (int, error) {
 	}
 	defer logFile.Close()
 
-	cmd := exec.Command(bin, "-d", m.Paths.RootDir, "-f", m.Paths.RuntimeFile)
+	var cmd *exec.Cmd
+	if m.Cfg.CoreBin != "" {
+		if _, err := os.Stat(m.Cfg.CoreBin); err != nil {
+			return 0, fmt.Errorf("configured core_bin not found: %s", m.Cfg.CoreBin)
+		}
+		cmd = exec.Command(m.Cfg.CoreBin, "-d", m.Paths.RootDir, "-f", m.Paths.RuntimeFile)
+	} else {
+		exe, err := os.Executable()
+		if err != nil {
+			return 0, fmt.Errorf("resolve manta executable: %w", err)
+		}
+		cmd = exec.Command(exe, "_daemon", "-d", m.Paths.RootDir, "-f", m.Paths.RuntimeFile)
+	}
+
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	if err := cmd.Start(); err != nil {
-		return 0, fmt.Errorf("start mihomo: %w", err)
+		return 0, fmt.Errorf("start daemon: %w", err)
 	}
 
 	pid := cmd.Process.Pid
@@ -118,7 +111,7 @@ func (m *Manager) Start() (int, error) {
 
 	// Wait briefly for External Controller to become ready.
 	client := api.NewClient(m.Cfg.Controller, m.Cfg.Secret)
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := client.Version(); err == nil {
 			return pid, nil
@@ -126,15 +119,14 @@ func (m *Manager) Start() (int, error) {
 		time.Sleep(150 * time.Millisecond)
 	}
 
-	// Process started, check if it exited early.
-	if err := syscall.Kill(pid, 0); err != nil {
+	if err := syscall.Kill(pid, 0); err != nil && !errors.Is(err, syscall.EPERM) {
 		_ = os.Remove(m.Paths.PIDFile)
-		return 0, fmt.Errorf("mihomo exited unexpectedly; check logs with `manta logs`")
+		return 0, fmt.Errorf("daemon exited unexpectedly; check logs with `manta logs`")
 	}
 	return pid, nil
 }
 
-// Stop terminates the running mihomo process and removes the PID file.
+// Stop terminates the running daemon process and removes the PID file.
 func (m *Manager) Stop() error {
 	running, pid := m.IsRunning()
 	if !running {
@@ -151,7 +143,7 @@ func (m *Manager) Stop() error {
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); err != nil {
+		if err := syscall.Kill(pid, 0); err != nil && !errors.Is(err, syscall.EPERM) {
 			_ = os.Remove(m.Paths.PIDFile)
 			return nil
 		}
