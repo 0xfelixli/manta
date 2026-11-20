@@ -115,10 +115,12 @@ func (m *Manager) Start() (int, error) {
 	}
 
 	client := api.NewClient(m.Cfg.Controller, m.Cfg.Secret)
-	deadline := time.Now().Add(4 * time.Second)
+	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := client.Version(); err == nil {
-			return pid, nil
+		if live, err := client.GetConfigs(); err == nil {
+			if !m.Cfg.TunEnabled || live.Tun.Enable {
+				return pid, nil
+			}
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
@@ -218,32 +220,16 @@ func (m *Manager) PowerOffAll() error {
 	return err
 }
 
-// HasRootCapability checks whether the current process is root or the manta binary has setuid-root bit set.
+// HasRootCapability checks whether the current process is running as root.
+// Note: macOS Apple Silicon ignores the setuid bit on ad-hoc signed binaries when
+// launched by a non-root user, so only euid == 0 guarantees utun privilege.
 func (m *Manager) HasRootCapability() bool {
-	if os.Geteuid() == 0 {
-		return true
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return false
-	}
-	if realExe, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = realExe
-	}
-	st, err := os.Stat(exe)
-	if err != nil {
-		return false
-	}
-	sys, ok := st.Sys().(*syscall.Stat_t)
-	if !ok {
-		return false
-	}
-	return sys.Uid == 0 && (st.Mode()&os.ModeSetuid) != 0
+	return os.Geteuid() == 0
 }
 
 // StartTunElevated restarts (or starts) the manta daemon with TUN enabled,
-// invoking the native macOS Touch ID / password authorization dialog if the binary
-// does not yet have root/setuid capability.
+// invoking the native macOS Touch ID / password authorization dialog if the current
+// process is not root.
 func (m *Manager) StartTunElevated() (int, error) {
 	m.Cfg.TunEnabled = true
 	_ = config.Save(m.Paths, m.Cfg)
@@ -252,7 +238,6 @@ func (m *Manager) StartTunElevated() (int, error) {
 		_ = m.Stop()
 	}
 
-	// Fast path: already root or binary already granted setuid-root!
 	if m.HasRootCapability() {
 		return m.Start()
 	}
@@ -271,12 +256,8 @@ func (m *Manager) StartTunElevated() (int, error) {
 	}
 
 	userEnv := os.Getenv("USER")
-	// Grant setuid-root to the binary (so future toggles never need a password prompt)
-	// and launch the TUN daemon immediately.
 	shellCmd := fmt.Sprintf(
-		"chown root:wheel '%s' && chmod u+s '%s' && SUDO_USER='%s' '%s' up --tun",
-		escapeSingleQuotes(realExe),
-		escapeSingleQuotes(realExe),
+		"SUDO_USER='%s' '%s' up --tun",
 		escapeSingleQuotes(userEnv),
 		escapeSingleQuotes(realExe),
 	)
@@ -295,11 +276,11 @@ func (m *Manager) StartTunElevated() (int, error) {
 		return 0, fmt.Errorf("macOS authorization failed: %s", msg)
 	}
 
-	// Wait briefly for controller readiness.
+	// Wait until External Controller reports Tun.Enable == true.
 	client := api.NewClient(m.Cfg.Controller, m.Cfg.Secret)
-	deadline := time.Now().Add(4 * time.Second)
+	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := client.Version(); err == nil {
+		if live, err := client.GetConfigs(); err == nil && live.Tun.Enable {
 			break
 		}
 		time.Sleep(150 * time.Millisecond)

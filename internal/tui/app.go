@@ -68,6 +68,7 @@ type connsPollMsg struct {
 	conns     []api.ConnectionItem
 	totalUp   int64
 	totalDown int64
+	liveCfg   *api.ConfigsResp
 }
 
 type exitIPLoadedMsg struct {
@@ -542,15 +543,16 @@ func (m model) Init() tea.Cmd {
 
 func (m model) pollConnsTickCmd() tea.Cmd {
 	return tea.Tick(2*time.Second, func(time.Time) tea.Msg {
-		conns, err := m.client.GetConnections()
-		if err != nil {
-			return connsPollMsg{}
+		var msg connsPollMsg
+		if conns, err := m.client.GetConnections(); err == nil {
+			msg.conns = conns.Connections
+			msg.totalUp = conns.UploadTotal
+			msg.totalDown = conns.DownloadTotal
 		}
-		return connsPollMsg{
-			conns:     conns.Connections,
-			totalUp:   conns.UploadTotal,
-			totalDown: conns.DownloadTotal,
+		if live, err := m.client.GetConfigs(); err == nil {
+			msg.liveCfg = live
 		}
+		return msg
 	})
 }
 
@@ -1209,6 +1211,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.totalUp = msg.totalUp
 			m.totalDown = msg.totalDown
 		}
+		if msg.liveCfg != nil {
+			m.online = true
+			m.mode = msg.liveCfg.Mode
+			m.allowLan = msg.liveCfg.AllowLan
+			m.tunOn = msg.liveCfg.Tun.Enable
+			m.tunStack = msg.liveCfg.Tun.Stack
+		}
 		return m, m.pollConnsTickCmd()
 
 	case trafficStartedMsg:
@@ -1728,9 +1737,9 @@ func (m model) View() string {
 	if m.online {
 		connBadge = pillOnlineStyle.Render("● ONLINE")
 	}
-	powerBtn := zone.Mark("btn:poweroff", pillOfflineStyle.Render("⏻ Power Off"))
+	powerBtn := zone.Mark("btn:poweroff", pillOfflineStyle.Render("Power Off"))
 	rightNav := fmt.Sprintf(
-		"%s   %s  %s   %s",
+		"%s  %s  %s  %s",
 		connBadge,
 		speedUpStyle.Render("↑ "+formatSpeed(m.up)),
 		speedDownStyle.Render("↓ "+formatSpeed(m.down)),
@@ -2000,7 +2009,7 @@ func (m model) renderDashboard(totalW, bodyH int) string {
 	if profile == "" {
 		profile = "(default)"
 	}
-	profileRow := kvValStyle.Render(profile) + "  " + zone.Mark("ctl:updatesub", miniBtnStyle.Render("↻ Update"))
+	profileRow := kvValStyle.Render(profile) + "  " + zone.Mark("ctl:updatesub", miniBtnStyle.Render("Update"))
 
 	c1Lines := []string{
 		joinLeftRight(cardTitleStyle.Render("Controls & Core"), dimStyle.Render("mihomo "+m.version), tlW),
@@ -2047,7 +2056,7 @@ func (m model) renderDashboard(totalW, bodyH int) string {
 		dimStyle.Render(fmt.Sprintf("• 127.0.0.1:%d", m.cfg.MixedPort)),
 	)
 	spark := renderSparkline(m.downHist, trW-16)
-	checkIPBtn := zone.Mark("ctl:checkip", miniBtnStyle.Render("↻ Check IP"))
+	checkIPBtn := zone.Mark("ctl:checkip", miniBtnStyle.Render("Check IP"))
 
 	c2Lines := []string{
 		joinLeftRight(cardTitleStyle.Render("Network & Exit"), checkIPBtn, trW),
