@@ -640,7 +640,11 @@ func (m model) toggleProxyDaemonCmd() tea.Cmd {
 func (m model) setModeCmd(target string) tea.Cmd {
 	return func() tea.Msg {
 		if err := m.client.SetMode(target); err != nil {
-			return actionResultMsg{err: err}
+			// If daemon is offline, still persist the preference to config.yaml.
+			return actionResultMsg{
+				status: fmt.Sprintf("✓ Saved mode → %s (daemon offline; press 'p' to start)", strings.ToUpper(target)),
+				kind:   toastInfo,
+			}
 		}
 		return actionResultMsg{
 			status:    fmt.Sprintf("✓ Routing mode → %s", strings.ToUpper(target)),
@@ -691,7 +695,10 @@ func (m model) toggleAllowLanCmd() tea.Cmd {
 	wantOn := !m.allowLan
 	return func() tea.Msg {
 		if err := m.client.SetAllowLan(wantOn); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{
+				status: fmt.Sprintf("✓ Saved Allow LAN = %v (daemon offline; press 'p' to start)", wantOn),
+				kind:   toastInfo,
+			}
 		}
 		if wantOn {
 			return actionResultMsg{status: fmt.Sprintf("✓ Allow LAN ON (port %d)", m.cfg.MixedPort), kind: toastSuccess, reload: true}
@@ -1468,16 +1475,22 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, m.setToast(toastInfo, "✓ Auto-test on open: OFF")
 
 		case zone.Get("set:mode:rule").InBounds(msg):
+			m.mode = "rule"
+			m.savePrefs()
 			m.busy = true
 			m.setToast(toastBusy, "Switching mode → RULE...")
 			return m, m.setModeCmd("rule")
 
 		case zone.Get("set:mode:global").InBounds(msg):
+			m.mode = "global"
+			m.savePrefs()
 			m.busy = true
 			m.setToast(toastBusy, "Switching mode → GLOBAL...")
 			return m, m.setModeCmd("global")
 
 		case zone.Get("set:mode:direct").InBounds(msg):
+			m.mode = "direct"
+			m.savePrefs()
 			m.busy = true
 			m.setToast(toastBusy, "Switching mode → DIRECT...")
 			return m, m.setModeCmd("direct")
@@ -1493,9 +1506,12 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, m.toggleSysProxyCmd()
 
 		case zone.Get("set:lan").InBounds(msg):
+			cmd := m.toggleAllowLanCmd()
+			m.allowLan = !m.allowLan
+			m.savePrefs()
 			m.busy = true
 			m.setToast(toastBusy, "Toggling Allow LAN...")
-			return m, m.toggleAllowLanCmd()
+			return m, cmd
 		}
 		return m, nil
 	}
@@ -1728,13 +1744,13 @@ func (m model) renderFooter(w int) string {
 
 func (m model) renderSettings(totalW, bodyH int) string {
 	halfW := (totalW - 5) / 2
-	if halfW < 32 {
-		halfW = 32
+	if halfW < 30 {
+		halfW = 30
 	}
 	rightHalfW := (totalW - 5) - halfW
 	cardInnerH := bodyH - 2
-	if cardInnerH < 10 {
-		cardInnerH = 10
+	if cardInnerH < 8 {
+		cardInnerH = 8
 	}
 
 	seg := func(id, label string, active bool) string {
@@ -1745,7 +1761,7 @@ func (m model) renderSettings(totalW, bodyH int) string {
 		return zone.Mark(id, st.Render(label))
 	}
 
-	// Left Card: UI & Behavior Preferences
+	// Left Card: UI & Behavior Preferences (compact, single-line rows, zero wrap)
 	lw := halfW - 2
 	sortSeg := seg("set:sort:speed", "Speed ↑", m.sortByFast) + " " +
 		seg("set:sort:default", "Original", !m.sortByFast)
@@ -1756,7 +1772,7 @@ func (m model) renderSettings(totalW, bodyH int) string {
 	}
 	startSeg := seg("set:start:dashboard", "Dashboard", startTab == "dashboard") + " " +
 		seg("set:start:proxies", "Proxies", startTab == "proxies") + " " +
-		seg("set:start:last", "Last Used", startTab == "last")
+		seg("set:start:last", "Last", startTab == "last")
 
 	autoTestSwitch := zone.Mark("set:autotest", switchOffStyle.Render("○ OFF"))
 	if m.cfg.AutoTestOnOpen {
@@ -1767,25 +1783,31 @@ func (m model) renderSettings(totalW, bodyH int) string {
 	if lastGrp == "" {
 		lastGrp = "(auto)"
 	}
+	profile := m.cfg.ActiveProfile
+	if profile == "" {
+		profile = "(default)"
+	}
 
 	leftLines := []string{
 		joinLeftRight(cardTitleStyle.Render("Preferences"), dimStyle.Render("auto-saved"), lw),
 		dimStyle.Render(strings.Repeat("─", lw)),
-		"",
 		kvLineRaw("Node Sort", sortSeg),
-		"",
 		kvLineRaw("Startup Tab", startSeg),
-		"",
 		kvLineRaw("Auto-Test", autoTestSwitch),
-		dimStyle.Render("               Automatically test group latency when opening TUI"),
-		"",
-		kvLine("Last Group", kvValStyle.Render(lastGrp), lw),
+		kvLine("Last Group", lastGrp, lw),
+		kvLine("Profile", profile, lw),
+	}
+	if len(leftLines) > cardInnerH {
+		leftLines = leftLines[:cardInnerH]
 	}
 	leftCard := cardStyle.Width(halfW).Height(cardInnerH).MaxHeight(cardInnerH + 2).Render(strings.Join(leftLines, "\n"))
 
-	// Right Card: Core & Network Settings
+	// Right Card: Core & Network Settings (compact, single-line rows, zero wrap)
 	rw := rightHalfW - 2
 	curMode := strings.ToLower(m.mode)
+	if curMode == "" {
+		curMode = strings.ToLower(m.cfg.Mode)
+	}
 	modeSeg := seg("set:mode:rule", "RULE", curMode == "rule") + " " +
 		seg("set:mode:global", "GLOBAL", curMode == "global") + " " +
 		seg("set:mode:direct", "DIRECT", curMode == "direct")
@@ -1817,18 +1839,16 @@ func (m model) renderSettings(totalW, bodyH int) string {
 	rightLines := []string{
 		joinLeftRight(cardTitleStyle.Render("Core & Network"), dimStyle.Render("mihomo "+m.version), rw),
 		dimStyle.Render(strings.Repeat("─", rw)),
-		"",
 		kvLineRaw("Routing Mode", modeSeg),
-		"",
 		kvLineRaw("TUN Capture", tunSwitch),
-		"",
 		kvLineRaw("macOS Proxy", sysSwitch),
-		"",
 		kvLineRaw("Allow LAN", lanSwitch),
-		"",
-		kvLine("Mixed Port", fmt.Sprintf("127.0.0.1:%d (HTTP + SOCKS5)", m.cfg.MixedPort), rw),
+		kvLine("Mixed Port", fmt.Sprintf("127.0.0.1:%d (HTTP/SOCKS5)", m.cfg.MixedPort), rw),
 		kvLine("Controller", "http://"+m.cfg.Controller, rw),
-		kvLine("Config File", dimStyle.Render(cfgPath), rw),
+		kvLine("Config File", cfgPath, rw),
+	}
+	if len(rightLines) > cardInnerH {
+		rightLines = rightLines[:cardInnerH]
 	}
 	rightCard := cardStyle.Width(rightHalfW).Height(cardInnerH).MaxHeight(cardInnerH + 2).Render(strings.Join(rightLines, "\n"))
 
