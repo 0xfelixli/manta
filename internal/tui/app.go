@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -26,6 +27,16 @@ type pane int
 const (
 	paneGroups pane = iota
 	paneNodes
+)
+
+type toastKind int
+
+const (
+	toastInfo toastKind = iota
+	toastBusy
+	toastSuccess
+	toastWarn
+	toastError
 )
 
 // Messages
@@ -48,14 +59,17 @@ type trafficSampleMsg struct {
 
 type actionResultMsg struct {
 	status     string
+	kind       toastKind
 	err        error
 	reload     bool
 	sysProxyOn *bool
 }
 
 type delayResultMsg struct {
-	results map[string]int // -1 indicates timeout/error
-	status  string
+	results   map[string]int // -1 indicates timeout/error
+	label     string
+	single    bool
+	autoSort  bool
 }
 
 // Adaptive styles for both light (white) and dark terminals.
@@ -66,8 +80,24 @@ var (
 			Background(lipgloss.AdaptiveColor{Light: "#0F172A", Dark: "#0EA5E9"}).
 			Padding(0, 1)
 
+	pillOnlineStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.AdaptiveColor{Light: "#065F46", Dark: "#D1FAE5"}).
+			Background(lipgloss.AdaptiveColor{Light: "#D1FAE5", Dark: "#065F46"}).
+			Padding(0, 1)
+
+	pillOfflineStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.AdaptiveColor{Light: "#991B1B", Dark: "#FEE2E2"}).
+				Background(lipgloss.AdaptiveColor{Light: "#FEE2E2", Dark: "#991B1B"}).
+				Padding(0, 1)
+
 	headerMetaStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "#334155", Dark: "#CBD5E1"})
+
+	exitLabelStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.AdaptiveColor{Light: "#0369A1", Dark: "#38BDF8"})
 
 	speedUpStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "#059669", Dark: "#34D399"}).
@@ -124,9 +154,35 @@ var (
 	dimStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "#64748B", Dark: "#94A3B8"})
 
-	errStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#DC2626", Dark: "#F87171"}).
-			Bold(true)
+	// High-visibility feedback toast styles
+	toastInfoStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{Light: "#334155", Dark: "#CBD5E1"}).
+			Background(lipgloss.AdaptiveColor{Light: "#F1F5F9", Dark: "#1E293B"}).
+			Padding(0, 1)
+
+	toastBusyStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.AdaptiveColor{Light: "#0369A1", Dark: "#E0F2FE"}).
+			Background(lipgloss.AdaptiveColor{Light: "#E0F2FE", Dark: "#0C4A6E"}).
+			Padding(0, 1)
+
+	toastSuccessStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.AdaptiveColor{Light: "#065F46", Dark: "#D1FAE5"}).
+				Background(lipgloss.AdaptiveColor{Light: "#D1FAE5", Dark: "#064E3B"}).
+				Padding(0, 1)
+
+	toastWarnStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.AdaptiveColor{Light: "#92400E", Dark: "#FEF3C7"}).
+			Background(lipgloss.AdaptiveColor{Light: "#FEF3C7", Dark: "#78350F"}).
+			Padding(0, 1)
+
+	toastErrorStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.AdaptiveColor{Light: "#991B1B", Dark: "#FEE2E2"}).
+			Background(lipgloss.AdaptiveColor{Light: "#FEE2E2", Dark: "#7F1D1D"}).
+			Padding(0, 1)
 
 	delayGoodStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "#059669", Dark: "#34D399"})
@@ -243,9 +299,11 @@ type model struct {
 	width  int
 	height int
 
+	online     bool
 	version    string
 	mode       string
 	sysProxyOn bool
+	sortByFast bool
 	up         int64
 	down       int64
 
@@ -261,8 +319,9 @@ type model struct {
 	busy          bool
 	initialized   bool
 
-	statusLine string
-	errLine    string
+	toastText string
+	toastType toastKind
+	toastTime time.Time
 }
 
 func newStyledList(title string, delegate list.ItemDelegate) list.Model {
@@ -307,12 +366,20 @@ func Run(cfg *config.AppConfig, client *api.Client) error {
 		nodeList:      newStyledList("Nodes", nodeDelegate{focused: &nf}),
 		spin:          sp,
 		busy:          true,
-		statusLine:    "Loading mihomo state...",
+		toastText:     "Connecting to mihomo controller...",
+		toastType:     toastBusy,
+		toastTime:     time.Now(),
 	}
 
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err
+}
+
+func (m *model) setToast(kind toastKind, text string) {
+	m.toastType = kind
+	m.toastText = text
+	m.toastTime = time.Now()
 }
 
 func (m model) Init() tea.Cmd {
@@ -376,7 +443,8 @@ func (m model) toggleSysProxyCmd() tea.Cmd {
 			}
 			on := true
 			return actionResultMsg{
-				status:     fmt.Sprintf("macOS system proxy enabled on [%s]", strings.Join(services, ", ")),
+				status:     fmt.Sprintf("✓ System proxy ON [%s] → 127.0.0.1:%d", strings.Join(services, ", "), port),
+				kind:       toastSuccess,
 				sysProxyOn: &on,
 			}
 		}
@@ -385,7 +453,8 @@ func (m model) toggleSysProxyCmd() tea.Cmd {
 		}
 		off := false
 		return actionResultMsg{
-			status:     fmt.Sprintf("macOS system proxy disabled on [%s]", strings.Join(services, ", ")),
+			status:     fmt.Sprintf("✓ System proxy OFF [%s]", strings.Join(services, ", ")),
+			kind:       toastWarn,
 			sysProxyOn: &off,
 		}
 	}
@@ -417,7 +486,8 @@ func (m model) selectNodeCmd(group, node string) tea.Cmd {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{
-			status: fmt.Sprintf("Switched %s → %s", group, node),
+			status: fmt.Sprintf("✓ Switched %s → %s", group, node),
+			kind:   toastSuccess,
 			reload: true,
 		}
 	}
@@ -438,13 +508,14 @@ func (m model) cycleModeCmd() tea.Cmd {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{
-			status: fmt.Sprintf("Mode switched to %s", next),
+			status: fmt.Sprintf("✓ Routing mode switched to %s", strings.ToUpper(next)),
+			kind:   toastSuccess,
 			reload: true,
 		}
 	}
 }
 
-func (m model) testNodesCmd(nodes []string, label string) tea.Cmd {
+func (m model) testNodesCmd(nodes []string, label string, single, autoSort bool) tea.Cmd {
 	return func() tea.Msg {
 		results := make(map[string]int, len(nodes))
 		var mu sync.Mutex
@@ -469,8 +540,10 @@ func (m model) testNodesCmd(nodes []string, label string) tea.Cmd {
 		}
 		wg.Wait()
 		return delayResultMsg{
-			results: results,
-			status:  fmt.Sprintf("Latency test complete (%s)", label),
+			results:  results,
+			label:    label,
+			single:   single,
+			autoSort: autoSort,
 		}
 	}
 }
@@ -488,11 +561,11 @@ func (m *model) syncSizes() {
 }
 
 // Vertical budget:
-//   Row 0: Header
-//   Row 1: Spacer (empty line for clean visual separation)
+//   Row 0: Header (ONLINE badge, mihomo, speed)
+//   Row 1: Current Active Exit & Routing summary line
 //   Row 2: Action buttons
 //   Row 3..3+paneInnerH+1: Bordered panes (paneInnerH + 2 lines)
-//   Row +2: Status line
+//   Row +2: High-visibility Toast feedback bar
 //   Row +3: Help line
 // Total = paneInnerH + 7.
 func (m model) layout() (w, h, leftBoxW, rightBoxW, paneInnerH int) {
@@ -532,6 +605,69 @@ func (m model) selectedGroup() (api.ProxyInfo, bool) {
 	return p, exists
 }
 
+// resolveActiveExit traces the active exit node for the current group (or primary selector),
+// following nested groups (e.g. 🚀节点选择 → ♻️自动选择 → 🇯🇵AWS日本01) to show the real exit node.
+func (m model) resolveActiveExit() (groupName, chain string, delay int) {
+	if !m.online || len(m.proxies) == 0 {
+		return "", "(offline)", 0
+	}
+	mode := strings.ToLower(m.mode)
+	if mode == "direct" {
+		return "DIRECT", "DIRECT (bypassing proxy)", 0
+	}
+	if mode == "global" {
+		if g, ok := m.proxies["GLOBAL"]; ok && g.Now != "" {
+			return "GLOBAL", m.traceChain("GLOBAL", g.Now), m.finalDelay(g.Now)
+		}
+	}
+	if g, ok := m.selectedGroup(); ok && g.Now != "" {
+		return g.Name, m.traceChain(g.Name, g.Now), m.finalDelay(g.Now)
+	}
+	return "", "(none)", 0
+}
+
+func (m model) traceChain(startGroup, first string) string {
+	parts := []string{startGroup}
+	cur := first
+	seen := map[string]bool{startGroup: true}
+	for cur != "" && !seen[cur] && len(parts) < 4 {
+		seen[cur] = true
+		parts = append(parts, cur)
+		p, ok := m.proxies[cur]
+		if !ok || p.Now == "" {
+			break
+		}
+		cur = p.Now
+	}
+	return strings.Join(parts, " → ")
+}
+
+func (m model) finalDelay(name string) int {
+	cur := name
+	seen := map[string]bool{}
+	for cur != "" && !seen[cur] {
+		seen[cur] = true
+		p, ok := m.proxies[cur]
+		if !ok || p.Now == "" {
+			return m.delays[cur]
+		}
+		cur = p.Now
+	}
+	return m.delays[cur]
+}
+
+// delayRank orders nodes when sorting by speed:
+//   positive latency (fastest first) < untested (0) < timeout (-1).
+func delayRank(ms int) int {
+	if ms > 0 {
+		return ms
+	}
+	if ms == 0 {
+		return 1_000_000
+	}
+	return 2_000_000
+}
+
 func (m *model) rebuildNodeList(preserveSelection bool) {
 	prevName := ""
 	if preserveSelection {
@@ -551,10 +687,23 @@ func (m *model) rebuildNodeList(preserveSelection bool) {
 	if g.Type == "Selector" {
 		badge = "Selectable"
 	}
-	m.nodeList.Title = fmt.Sprintf("%s  [%s • %s]", g.Name, g.Type, badge)
-	items := make([]list.Item, 0, len(g.All))
+	sortTag := ""
+	if m.sortByFast {
+		sortTag = " • Sorted by Speed ↑"
+	}
+	m.nodeList.Title = fmt.Sprintf("%s  [%s • %s%s]", g.Name, g.Type, badge, sortTag)
+
+	names := make([]string, len(g.All))
+	copy(names, g.All)
+	if m.sortByFast {
+		sort.SliceStable(names, func(i, j int) bool {
+			return delayRank(m.delays[names[i]]) < delayRank(m.delays[names[j]])
+		})
+	}
+
+	items := make([]list.Item, 0, len(names))
 	targetIdx := 0
-	for i, name := range g.All {
+	for i, name := range names {
 		items = append(items, nodeItem{
 			name:   name,
 			active: name == g.Now,
@@ -592,10 +741,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case stateLoadedMsg:
 		m.busy = false
 		if msg.err != nil {
-			m.errLine = fmt.Sprintf("Controller error: %v (is `manta up` running?)", msg.err)
+			m.online = false
+			m.setToast(toastError, fmt.Sprintf("✗ Offline: %v (run `manta up`)", msg.err))
 			return m, nil
 		}
-		m.errLine = ""
+		m.online = true
 		m.version = msg.version
 		m.mode = msg.mode
 		m.sysProxyOn = msg.sysProxyOn
@@ -622,7 +772,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		sort.Strings(selectors)
 		sort.Strings(autos)
 
-		// Put selectable groups first (pushing GLOBAL to the end of selectors).
 		var ordered []string
 		hasGlobal := false
 		for _, s := range selectors {
@@ -651,14 +800,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				groupIdx = i
 			}
 		}
+		firstLoad := !m.initialized
 		m.initialized = true
 		m.groupList.SetItems(items)
 		if groupIdx < len(items) {
 			m.groupList.Select(groupIdx)
 		}
 		m.rebuildNodeList(true)
-		if m.statusLine == "Loading mihomo state..." {
-			m.statusLine = fmt.Sprintf("Ready • %d groups loaded", len(ordered))
+		if firstLoad {
+			m.setToast(toastSuccess, fmt.Sprintf("✓ Connected to mihomo %s • %d groups ready", m.version, len(ordered)))
 		}
 		return m, nil
 
@@ -673,11 +823,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		m.busy = false
 		if msg.err != nil {
-			m.errLine = msg.err.Error()
+			m.setToast(toastError, "✗ "+msg.err.Error())
 			return m, nil
 		}
-		m.errLine = ""
-		m.statusLine = msg.status
+		m.setToast(msg.kind, msg.status)
 		if msg.sysProxyOn != nil {
 			m.sysProxyOn = *msg.sysProxyOn
 		}
@@ -688,11 +837,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case delayResultMsg:
 		m.busy = false
+		bestName := ""
+		bestMs := 1_000_000
+		okCount := 0
 		for k, v := range msg.results {
 			m.delays[k] = v
+			if v > 0 {
+				okCount++
+				if v < bestMs {
+					bestMs = v
+					bestName = k
+				}
+			}
 		}
-		m.rebuildNodeList(true)
-		m.statusLine = msg.status
+		if msg.autoSort {
+			m.sortByFast = true
+		}
+		m.rebuildNodeList(!msg.autoSort)
+		if msg.single {
+			d := msg.results[msg.label]
+			if d > 0 {
+				m.setToast(toastSuccess, fmt.Sprintf("✓ %s: %dms", msg.label, d))
+			} else {
+				m.setToast(toastError, fmt.Sprintf("✗ %s: timeout", msg.label))
+			}
+		} else if bestName != "" {
+			m.setToast(toastSuccess, fmt.Sprintf("✓ Tested %s (%d/%d alive, sorted by speed) • Fastest: %s (%dms)", msg.label, okCount, len(msg.results), bestName, bestMs))
+		} else {
+			m.setToast(toastWarn, fmt.Sprintf("⚠ Tested %s: all %d nodes timed out", msg.label, len(msg.results)))
+		}
 		return m, nil
 
 	case tea.MouseMsg:
@@ -725,52 +898,47 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.setFocus(paneNodes)
 				return m, nil
 			}
-			g, ok := m.selectedGroup()
-			if !ok {
-				return m, nil
-			}
-			node, ok := m.nodeList.SelectedItem().(nodeItem)
-			if !ok {
-				return m, nil
-			}
-			if g.Type != "Selector" {
-				m.busy = true
-				m.statusLine = fmt.Sprintf("%s is auto-managed; testing %s...", g.Name, node.name)
-				return m, m.testNodesCmd([]string{node.name}, node.name)
-			}
-			m.busy = true
-			m.statusLine = fmt.Sprintf("Switching %s → %s...", g.Name, node.name)
-			return m, m.selectNodeCmd(g.Name, node.name)
+			return m.activateSelectedNode()
 
 		case "t":
 			if node, ok := m.nodeList.SelectedItem().(nodeItem); ok {
 				m.busy = true
-				m.statusLine = fmt.Sprintf("Testing %s...", node.name)
-				return m, m.testNodesCmd([]string{node.name}, node.name)
+				m.setToast(toastBusy, fmt.Sprintf("Testing %s...", node.name))
+				return m, m.testNodesCmd([]string{node.name}, node.name, true, false)
 			}
 			return m, nil
 
 		case "T":
 			if g, ok := m.selectedGroup(); ok && len(g.All) > 0 {
 				m.busy = true
-				m.statusLine = fmt.Sprintf("Testing %d nodes in %s...", len(g.All), g.Name)
-				return m, m.testNodesCmd(g.All, g.Name)
+				m.setToast(toastBusy, fmt.Sprintf("Testing %d nodes in %s...", len(g.All), g.Name))
+				return m, m.testNodesCmd(g.All, g.Name, false, true)
+			}
+			return m, nil
+
+		case "o":
+			m.sortByFast = !m.sortByFast
+			m.rebuildNodeList(true)
+			if m.sortByFast {
+				m.setToast(toastInfo, "↕ Sorted nodes by speed (fastest first)")
+			} else {
+				m.setToast(toastInfo, "↕ Restored default node order")
 			}
 			return m, nil
 
 		case "s":
 			m.busy = true
-			m.statusLine = "Toggling macOS system proxy..."
+			m.setToast(toastBusy, "Toggling macOS system proxy...")
 			return m, m.toggleSysProxyCmd()
 
 		case "m":
 			m.busy = true
-			m.statusLine = "Switching mode..."
+			m.setToast(toastBusy, "Switching routing mode...")
 			return m, m.cycleModeCmd()
 
 		case "r":
 			m.busy = true
-			m.statusLine = "Refreshing..."
+			m.setToast(toastBusy, "Refreshing state...")
 			return m, m.loadStateCmd()
 		}
 
@@ -778,6 +946,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m model) activateSelectedNode() (tea.Model, tea.Cmd) {
+	g, ok := m.selectedGroup()
+	if !ok {
+		return m, nil
+	}
+	node, ok := m.nodeList.SelectedItem().(nodeItem)
+	if !ok {
+		return m, nil
+	}
+	if g.Type != "Selector" {
+		m.busy = true
+		m.setToast(toastBusy, fmt.Sprintf("%s is auto-managed; testing %s...", g.Name, node.name))
+		return m, m.testNodesCmd([]string{node.name}, node.name, true, false)
+	}
+	// Optimistic UI update so the green dot moves immediately on click.
+	g.Now = node.name
+	m.proxies[g.Name] = g
+	m.rebuildNodeList(true)
+
+	m.busy = true
+	m.setToast(toastBusy, fmt.Sprintf("Switching %s → %s...", g.Name, node.name))
+	return m, m.selectNodeCmd(g.Name, node.name)
 }
 
 func (m model) updateActiveList(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -798,7 +990,6 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	_, _, leftBoxW, _, _ := m.layout()
 	leftOuterW := leftBoxW + 2
 
-	// Wheel scroll directly based on left/right column boundary (no nested bubblezone!).
 	if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
 		key := tea.KeyMsg{Type: tea.KeyDown}
 		if msg.Button == tea.MouseButtonWheelUp {
@@ -816,51 +1007,63 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Top action toolbar buttons via bubblezone.
 	switch {
 	case zone.Get("btn:mode").InBounds(msg):
 		m.busy = true
-		m.statusLine = "Switching mode..."
+		m.setToast(toastBusy, "Switching routing mode...")
 		return m, m.cycleModeCmd()
 
 	case zone.Get("btn:sysproxy").InBounds(msg):
 		m.busy = true
-		m.statusLine = "Toggling macOS system proxy..."
+		m.setToast(toastBusy, "Toggling macOS system proxy...")
 		return m, m.toggleSysProxyCmd()
+
+	case zone.Get("btn:sort").InBounds(msg):
+		m.sortByFast = !m.sortByFast
+		m.rebuildNodeList(true)
+		if m.sortByFast {
+			m.setToast(toastInfo, "↕ Sorted nodes by speed (fastest first)")
+		} else {
+			m.setToast(toastInfo, "↕ Restored default node order")
+		}
+		return m, nil
 
 	case zone.Get("btn:testnode").InBounds(msg):
 		if node, ok := m.nodeList.SelectedItem().(nodeItem); ok {
 			m.busy = true
-			m.statusLine = fmt.Sprintf("Testing %s...", node.name)
-			return m, m.testNodesCmd([]string{node.name}, node.name)
+			m.setToast(toastBusy, fmt.Sprintf("Testing %s...", node.name))
+			return m, m.testNodesCmd([]string{node.name}, node.name, true, false)
 		}
 		return m, nil
 
 	case zone.Get("btn:testgroup").InBounds(msg):
 		if g, ok := m.selectedGroup(); ok && len(g.All) > 0 {
 			m.busy = true
-			m.statusLine = fmt.Sprintf("Testing %d nodes in %s...", len(g.All), g.Name)
-			return m, m.testNodesCmd(g.All, g.Name)
+			m.setToast(toastBusy, fmt.Sprintf("Testing %d nodes in %s...", len(g.All), g.Name))
+			return m, m.testNodesCmd(g.All, g.Name, false, true)
 		}
 		return m, nil
 
 	case zone.Get("btn:search").InBounds(msg):
 		m.setFocus(paneNodes)
+		m.setToast(toastInfo, "Type to filter nodes, Enter to apply, Esc to clear")
 		return m.updateActiveList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
 
 	case zone.Get("btn:prev").InBounds(msg):
 		m.setFocus(paneNodes)
 		m.nodeList.Paginator.PrevPage()
+		m.setToast(toastInfo, fmt.Sprintf("Page %d / %d", m.nodeList.Paginator.Page+1, m.nodeList.Paginator.TotalPages))
 		return m, nil
 
 	case zone.Get("btn:next").InBounds(msg):
 		m.setFocus(paneNodes)
 		m.nodeList.Paginator.NextPage()
+		m.setToast(toastInfo, fmt.Sprintf("Page %d / %d", m.nodeList.Paginator.Page+1, m.nodeList.Paginator.TotalPages))
 		return m, nil
 
 	case zone.Get("btn:refresh").InBounds(msg):
 		m.busy = true
-		m.statusLine = "Refreshing..."
+		m.setToast(toastBusy, "Refreshing state...")
 		return m, m.loadStateCmd()
 
 	case zone.Get("btn:quit").InBounds(msg):
@@ -868,40 +1071,28 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
-	// Click on any rendered group row.
-	for i := range m.groupList.VisibleItems() {
+	// Click on group row
+	for i, item := range m.groupList.VisibleItems() {
 		if zone.Get(fmt.Sprintf("group:%d", i)).InBounds(msg) {
 			m.setFocus(paneGroups)
 			m.groupList.Select(i)
 			m.rebuildNodeList(false)
+			if g, ok := item.(groupItem); ok {
+				m.setToast(toastInfo, fmt.Sprintf("Viewing %s (%s • active: %s)", g.name, g.kind, g.now))
+			}
 			return m, nil
 		}
 	}
 
-	// Click on any rendered node row.
-	for i, item := range m.nodeList.VisibleItems() {
+	// Click on node row
+	for i := range m.nodeList.VisibleItems() {
 		if zone.Get(fmt.Sprintf("node:%d", i)).InBounds(msg) {
 			m.setFocus(paneNodes)
 			m.nodeList.Select(i)
-			n, ok := item.(nodeItem)
-			if !ok {
-				return m, nil
-			}
-			if g, ok := m.selectedGroup(); ok {
-				if g.Type != "Selector" {
-					m.busy = true
-					m.statusLine = fmt.Sprintf("%s is auto-managed; testing %s...", g.Name, n.name)
-					return m, m.testNodesCmd([]string{n.name}, n.name)
-				}
-				m.busy = true
-				m.statusLine = fmt.Sprintf("Switching %s → %s...", g.Name, n.name)
-				return m, m.selectNodeCmd(g.Name, n.name)
-			}
-			return m, nil
+			return m.activateSelectedNode()
 		}
 	}
 
-	// Clicking anywhere else inside left/right pane focuses that pane.
 	if msg.Y >= 3 {
 		if msg.X < leftOuterW {
 			m.setFocus(paneGroups)
@@ -915,20 +1106,43 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	w, _, leftBoxW, rightBoxW, paneInnerH := m.layout()
 
-	// Row 0: Header
+	// Row 0: Header with live ONLINE/OFFLINE badge & real-time speeds
 	profile := m.cfg.ActiveProfile
 	if profile == "" {
 		profile = "default"
 	}
+	connBadge := pillOfflineStyle.Render("● OFFLINE")
+	if m.online {
+		connBadge = pillOnlineStyle.Render("● ONLINE")
+	}
 	leftHeader := fmt.Sprintf(
-		"%s  %s",
+		"%s %s  %s",
 		badgeStyle.Render("MANTA"),
-		headerMetaStyle.Render(fmt.Sprintf("mihomo %s  •  %s  •  127.0.0.1:%d", m.version, profile, m.cfg.MixedPort)),
+		connBadge,
+		headerMetaStyle.Render(fmt.Sprintf("mihomo %s • %s • 127.0.0.1:%d", m.version, profile, m.cfg.MixedPort)),
 	)
 	rightHeader := fmt.Sprintf("%s  %s", speedUpStyle.Render("↑ "+formatSpeed(m.up)), speedDownStyle.Render("↓ "+formatSpeed(m.down)))
 	header := joinLeftRight(leftHeader, rightHeader, w)
 
-	// Row 2: Clickable action toolbar (all leaf bubblezones)
+	// Row 1: Live active exit summary so current state is crystal clear at a glance
+	_, chain, exitDelay := m.resolveActiveExit()
+	delayTag := ""
+	if exitDelay > 0 {
+		delayTag = " (" + strings.TrimSpace(formatDelayPlain(exitDelay)) + ")"
+	}
+	captureMode := "Local Proxy Only"
+	if m.sysProxyOn {
+		captureMode = "macOS SysProxy ON"
+	}
+	exitSummary := fmt.Sprintf(
+		"%s %s  %s",
+		exitLabelStyle.Render("Active Exit:"),
+		rowTextStyle.Render(chain+delayTag),
+		dimStyle.Render("["+captureMode+"]"),
+	)
+	exitSummary = ansi.Truncate(exitSummary, w, "…")
+
+	// Row 2: Clickable action toolbar
 	mode := m.mode
 	if mode == "" {
 		mode = m.cfg.Mode
@@ -939,6 +1153,12 @@ func (m model) View() string {
 		sysLabel = "SysProxy: ON"
 		sysStyle = btnOnStyle
 	}
+	sortLabel := "Sort: Default"
+	sortStyle := btnStyle
+	if m.sortByFast {
+		sortLabel = "Sort: Speed ↑"
+		sortStyle = btnAccentStyle
+	}
 	buttons := []string{
 		zone.Mark("btn:mode", btnAccentStyle.Render("Mode: "+strings.ToUpper(mode))),
 	}
@@ -946,6 +1166,7 @@ func (m model) View() string {
 		buttons = append(buttons, zone.Mark("btn:sysproxy", sysStyle.Render(sysLabel)))
 	}
 	buttons = append(buttons,
+		zone.Mark("btn:sort", sortStyle.Render(sortLabel)),
 		zone.Mark("btn:testnode", btnStyle.Render("Test Node")),
 		zone.Mark("btn:testgroup", btnStyle.Render("Test Group")),
 		zone.Mark("btn:search", btnStyle.Render("Search /")),
@@ -964,7 +1185,7 @@ func (m model) View() string {
 	)
 	actionBar := strings.Join(buttons, " ")
 
-	// Row 3..: Two-pane body (NO outer zone.Mark wrapper so inner row zones work 100%)
+	// Row 3..: Two-pane body
 	leftStyle := paneBorderInactive.Width(leftBoxW).Height(paneInnerH).MaxHeight(paneInnerH + 2)
 	rightStyle := paneBorderInactive.Width(rightBoxW).Height(paneInnerH).MaxHeight(paneInnerH + 2)
 	if m.focus == paneGroups {
@@ -972,21 +1193,32 @@ func (m model) View() string {
 	} else {
 		rightStyle = paneBorderActive.Width(rightBoxW).Height(paneInnerH).MaxHeight(paneInnerH + 2)
 	}
-
 	body := lipgloss.JoinHorizontal(lipgloss.Top, leftStyle.Render(m.groupList.View()), " ", rightStyle.Render(m.nodeList.View()))
 
-	// Footer
-	statusText := m.statusLine
+	// Footer: High-visibility Toast feedback bar with timestamp
+	ts := m.toastTime.Format("15:04:05")
+	toastMsg := fmt.Sprintf("[%s] %s", ts, m.toastText)
 	if m.busy {
-		statusText = m.spin.View() + " " + statusText
+		toastMsg = fmt.Sprintf("[%s] %s %s", ts, m.spin.View(), m.toastText)
 	}
-	status := dimStyle.Render(ansi.Truncate(statusText, w, "…"))
-	if m.errLine != "" {
-		status = errStyle.Render(ansi.Truncate(m.errLine, w, "…"))
+	toastMsg = ansi.Truncate(toastMsg, w-2, "…")
+	var toastRendered string
+	switch m.toastType {
+	case toastBusy:
+		toastRendered = toastBusyStyle.Width(w).Render(toastMsg)
+	case toastSuccess:
+		toastRendered = toastSuccessStyle.Width(w).Render(toastMsg)
+	case toastWarn:
+		toastRendered = toastWarnStyle.Width(w).Render(toastMsg)
+	case toastError:
+		toastRendered = toastErrorStyle.Width(w).Render(toastMsg)
+	default:
+		toastRendered = toastInfoStyle.Width(w).Render(toastMsg)
 	}
-	help := dimStyle.Render(ansi.Truncate("Click/Scroll: select  •  /: search  •  s: sysproxy  •  m: mode  •  t/T: test  •  r: refresh  •  q: quit", w, "…"))
 
-	return zone.Scan(lipgloss.JoinVertical(lipgloss.Left, header, "", actionBar, body, status, help))
+	help := dimStyle.Render(ansi.Truncate("Click/Scroll: select  •  o: sort speed  •  /: search  •  s: sysproxy  •  m: mode  •  t/T: test  •  r: refresh  •  q: quit", w, "…"))
+
+	return zone.Scan(lipgloss.JoinVertical(lipgloss.Left, header, exitSummary, actionBar, body, toastRendered, help))
 }
 
 func joinLeftRight(left, right string, totalW int) string {
