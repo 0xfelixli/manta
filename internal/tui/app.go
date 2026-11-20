@@ -107,8 +107,8 @@ type toastExpireMsg struct {
 var (
 	badgeStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.AdaptiveColor{Light: "#0F172A", Dark: "#0EA5E9"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#0369A1", Dark: "#E0F2FE"}).
+			Background(lipgloss.AdaptiveColor{Light: "#DBEAFE", Dark: "#0369A1"}).
 			Padding(0, 1)
 
 	pillOnlineStyle = lipgloss.NewStyle().
@@ -125,8 +125,8 @@ var (
 
 	tabActiveStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.AdaptiveColor{Light: "#0F172A", Dark: "#0EA5E9"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#0369A1", Dark: "#E0F2FE"}).
+			Background(lipgloss.AdaptiveColor{Light: "#E0F2FE", Dark: "#0369A1"}).
 			Padding(0, 1)
 
 	tabInactiveStyle = lipgloss.NewStyle().
@@ -178,8 +178,8 @@ var (
 
 	segActiveStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.AdaptiveColor{Light: "#0F172A", Dark: "#0EA5E9"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#0369A1", Dark: "#E0F2FE"}).
+			Background(lipgloss.AdaptiveColor{Light: "#DBEAFE", Dark: "#0369A1"}).
 			Padding(0, 1)
 
 	segInactiveStyle = lipgloss.NewStyle().
