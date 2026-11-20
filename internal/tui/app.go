@@ -126,12 +126,15 @@ var (
 	tabActiveStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.AdaptiveColor{Light: "#0284C7", Dark: "#0EA5E9"}).
+			Background(lipgloss.AdaptiveColor{Light: "#0F172A", Dark: "#0EA5E9"}).
 			Padding(0, 1)
 
 	tabInactiveStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.AdaptiveColor{Light: "#475569", Dark: "#94A3B8"}).
 				Padding(0, 1)
+
+	headerRuleStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{Light: "#E2E8F0", Dark: "#334155"})
 
 	exitLabelStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -176,7 +179,7 @@ var (
 	segActiveStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.AdaptiveColor{Light: "#0284C7", Dark: "#0EA5E9"}).
+			Background(lipgloss.AdaptiveColor{Light: "#0F172A", Dark: "#0EA5E9"}).
 			Padding(0, 1)
 
 	segInactiveStyle = lipgloss.NewStyle().
@@ -802,8 +805,8 @@ func (m *model) setFocus(p pane) {
 
 func (m *model) syncSizes() {
 	_, _, leftBoxW, rightBoxW, bodyH := m.layout()
-	// Proxies tab has a 1-row action bar above the two panes.
-	paneInnerH := bodyH - 3
+	// Proxies tab has a 1-row action bar + 1 blank breathing row above the two panes.
+	paneInnerH := bodyH - 4
 	if paneInnerH < 5 {
 		paneInnerH = 5
 	}
@@ -811,21 +814,22 @@ func (m *model) syncSizes() {
 	m.nodeList.SetSize(rightBoxW-2, paneInnerH)
 }
 
-// Vertical budget (ultra-clean):
+// Vertical budget:
 //   Row 0: 1-line Nav Header (MANTA + Tabs + Online + Live Speed)
-//   Row 1..1+bodyH-1: Main workspace (Dashboard 2x2 grid OR Proxies toolbar+panes)
+//   Row 1: 1-line subtle horizontal divider rule
+//   Row 2..: Main workspace (bodyH lines)
 //   Last Row: 1-line Smart Footer (transient Toast OR contextual key hints)
-// Total = bodyH + 2 <= h.
+// Total = bodyH + 3 <= h.
 func (m model) layout() (w, h, leftBoxW, rightBoxW, bodyH int) {
 	w = m.width
 	if w < 64 {
 		w = 80
 	}
 	h = m.height
-	if h < 16 {
+	if h < 17 {
 		h = 24
 	}
-	bodyH = h - 2
+	bodyH = h - 3
 	if bodyH < 12 {
 		bodyH = 12
 	}
@@ -1503,7 +1507,7 @@ func (m model) View() string {
 		proxTab = tabActiveStyle.Render("2 Proxies")
 	}
 	leftNav := fmt.Sprintf(
-		"%s  %s %s",
+		"%s   %s  %s",
 		badgeStyle.Render("MANTA"),
 		zone.Mark("tab:dashboard", dashTab),
 		zone.Mark("tab:proxies", proxTab),
@@ -1514,12 +1518,13 @@ func (m model) View() string {
 		connBadge = pillOnlineStyle.Render("● ONLINE")
 	}
 	rightNav := fmt.Sprintf(
-		"%s  %s  %s",
+		"%s   %s  %s",
 		connBadge,
 		speedUpStyle.Render("↑ "+formatSpeed(m.up)),
 		speedDownStyle.Render("↓ "+formatSpeed(m.down)),
 	)
 	header := joinLeftRight(leftNav, rightNav, w)
+	divider := headerRuleStyle.Render(strings.Repeat("─", w))
 
 	// Main workspace
 	var body string
@@ -1532,7 +1537,7 @@ func (m model) View() string {
 	// Single smart footer row: transient colored Toast OR contextual key hints
 	footer := m.renderFooter(w)
 
-	return zone.Scan(lipgloss.JoinVertical(lipgloss.Left, header, body, footer))
+	return zone.Scan(lipgloss.JoinVertical(lipgloss.Left, header, divider, body, footer))
 }
 
 func (m model) renderFooter(w int) string {
@@ -1572,23 +1577,23 @@ func (m model) renderProxies(w, leftBoxW, rightBoxW, bodyH int) string {
 		sortLabel = "Sort: Speed ↑"
 		sortStyle = btnAccentStyle
 	}
-	toolbar := []string{
+	leftActions := strings.Join([]string{
 		zone.Mark("btn:sort", sortStyle.Render(sortLabel)),
 		zone.Mark("btn:testnode", btnStyle.Render("Test Node")),
 		zone.Mark("btn:testgroup", btnStyle.Render("Test Group")),
 		zone.Mark("btn:search", btnStyle.Render("Search /")),
-	}
-	if m.nodeList.Paginator.TotalPages > 1 {
-		pageLabel := fmt.Sprintf("%d/%d", m.nodeList.Paginator.Page+1, m.nodeList.Paginator.TotalPages)
-		toolbar = append(toolbar,
-			zone.Mark("btn:prev", btnStyle.Render("◀")),
-			dimStyle.Render(pageLabel),
-			zone.Mark("btn:next", btnStyle.Render("▶")),
-		)
-	}
-	actionRow := strings.Join(toolbar, " ")
+	}, "  ")
 
-	paneInnerH := bodyH - 3
+	rightPager := ""
+	if m.nodeList.Paginator.TotalPages > 1 {
+		pageLabel := fmt.Sprintf(" %d / %d ", m.nodeList.Paginator.Page+1, m.nodeList.Paginator.TotalPages)
+		rightPager = zone.Mark("btn:prev", btnStyle.Render("◀")) +
+			dimStyle.Render(pageLabel) +
+			zone.Mark("btn:next", btnStyle.Render("▶"))
+	}
+	actionRow := joinLeftRight(leftActions, rightPager, w)
+
+	paneInnerH := bodyH - 4
 	if paneInnerH < 5 {
 		paneInnerH = 5
 	}
@@ -1600,7 +1605,7 @@ func (m model) renderProxies(w, leftBoxW, rightBoxW, bodyH int) string {
 		rightStyle = paneBorderActive.Width(rightBoxW).Height(paneInnerH).MaxHeight(paneInnerH + 2)
 	}
 	panes := lipgloss.JoinHorizontal(lipgloss.Top, leftStyle.Render(m.groupList.View()), " ", rightStyle.Render(m.nodeList.View()))
-	return lipgloss.JoinVertical(lipgloss.Left, actionRow, panes)
+	return lipgloss.JoinVertical(lipgloss.Left, actionRow, "", panes)
 }
 
 func (m model) renderDashboard(totalW, bodyH int) string {
