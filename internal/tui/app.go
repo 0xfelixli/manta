@@ -324,11 +324,11 @@ func (d groupDelegate) Render(w io.Writer, m list.Model, index int, item list.It
 	if g.kind != "Selector" {
 		rightTag = fmt.Sprintf("auto %d", g.count)
 	}
-	nameMax := width - len(rightTag) - 3
+	nameMax := width - len(rightTag) - 4
 	if nameMax < 6 {
 		nameMax = 6
 	}
-	name := ansi.Truncate(g.name, nameMax, "…")
+	name := ansi.Truncate(cleanDisplay(g.name), nameMax, "…")
 
 	var line string
 	if index == m.Index() {
@@ -361,11 +361,11 @@ func (d nodeDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 		width = 30
 	}
 	delayPlain := formatDelayPlain(n.delay)
-	nameMax := width - 2 - 2 - lipgloss.Width(delayPlain)
+	nameMax := width - 2 - 3 - lipgloss.Width(delayPlain)
 	if nameMax < 8 {
 		nameMax = 8
 	}
-	name := ansi.Truncate(n.name, nameMax, "…")
+	name := ansi.Truncate(cleanDisplay(n.name), nameMax, "…")
 
 	var line string
 	if index == m.Index() && d.focused != nil && *d.focused {
@@ -896,24 +896,24 @@ func (m *model) syncSizes() {
 	if paneInnerH < 5 {
 		paneInnerH = 5
 	}
-	m.groupList.SetSize(leftBoxW-2, paneInnerH)
-	m.nodeList.SetSize(rightBoxW-2, paneInnerH)
+	m.groupList.SetSize(leftBoxW-4, paneInnerH)
+	m.nodeList.SetSize(rightBoxW-4, paneInnerH)
 }
 
-// Vertical budget:
-//   Row 0: 1-line Nav Header (MANTA + Tabs + Online + Live Speed)
+// Vertical & horizontal budget with safety margin so terminal emulators NEVER auto-wrap a line:
+//   Row 0: 1-line Nav Header
 //   Row 1: 1-line subtle horizontal divider rule
 //   Row 2..: Main workspace (bodyH lines)
-//   Last Row: 1-line Smart Footer (transient Toast OR contextual key hints)
-// Total = bodyH + 3 <= h.
+//   Last Row: 1-line Smart Footer
+// Total height = bodyH + 3 <= h - 1; Total width = w <= m.width - 2.
 func (m model) layout() (w, h, leftBoxW, rightBoxW, bodyH int) {
-	w = m.width
+	w = m.width - 2
 	if w < 64 {
-		w = 80
+		w = 78
 	}
-	h = m.height
+	h = m.height - 1
 	if h < 17 {
-		h = 24
+		h = 23
 	}
 	bodyH = h - 3
 	if bodyH < 12 {
@@ -978,19 +978,19 @@ func (m model) resolveActiveExit() (groupName, chain string, delay int) {
 }
 
 func (m model) traceChain(startGroup, first string) string {
-	parts := []string{startGroup}
+	parts := []string{cleanDisplay(startGroup)}
 	cur := first
 	seen := map[string]bool{startGroup: true}
 	for cur != "" && !seen[cur] && len(parts) < 4 {
 		seen[cur] = true
-		parts = append(parts, cur)
+		parts = append(parts, cleanDisplay(cur))
 		p, ok := m.proxies[cur]
 		if !ok || p.Now == "" {
 			break
 		}
 		cur = p.Now
 	}
-	return strings.Join(parts, " → ")
+	return strings.Join(parts, " -> ")
 }
 
 func (m model) finalDelay(name string) int {
@@ -1038,9 +1038,9 @@ func (m *model) rebuildNodeList(preserveSelection bool) {
 	}
 	sortTag := ""
 	if m.sortByFast {
-		sortTag = " • Speed ↑"
+		sortTag = " • Speed"
 	}
-	m.nodeList.Title = fmt.Sprintf("%s  [%s • %s%s]", g.Name, g.Type, badge, sortTag)
+	m.nodeList.Title = fmt.Sprintf("%s  [%s • %s%s]", cleanDisplay(g.Name), g.Type, badge, sortTag)
 
 	names := make([]string, len(g.All))
 	copy(names, g.All)
@@ -1247,7 +1247,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sysProxyOn = *msg.sysProxyOn
 		}
 		if msg.reload {
-			cmds = append(cmds, m.loadStateCmd())
+			cmds = append(cmds, tea.ClearScreen, m.loadStateCmd())
 		}
 		if msg.refreshIP {
 			m.checkingIP = true
@@ -1312,16 +1312,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "1":
 			m.activeTab = tabDashboard
 			m.savePrefs()
-			return m, nil
+			return m, tea.ClearScreen
 
 		case "2":
 			m.activeTab = tabProxies
 			m.savePrefs()
-			return m, nil
+			return m, tea.ClearScreen
 
 		case "3":
 			m.activeTab = tabSettings
-			return m, nil
+			return m, tea.ClearScreen
 
 		case "p":
 			m.busy = true
@@ -1476,14 +1476,14 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	case zone.Get("tab:dashboard").InBounds(msg):
 		m.activeTab = tabDashboard
 		m.savePrefs()
-		return m, nil
+		return m, tea.ClearScreen
 	case zone.Get("tab:proxies").InBounds(msg):
 		m.activeTab = tabProxies
 		m.savePrefs()
-		return m, nil
+		return m, tea.ClearScreen
 	case zone.Get("tab:settings").InBounds(msg):
 		m.activeTab = tabSettings
-		return m, nil
+		return m, tea.ClearScreen
 	case zone.Get("btn:poweroff").InBounds(msg):
 		m.busy = true
 		m.setToast(toastBusy, "Powering off daemon, system proxy & menu bar...")
@@ -1964,7 +1964,7 @@ func (m model) renderDashboard(totalW, bodyH int) string {
 	}
 
 	// ── Top-Left Card: Controls & Core (Status == Interactive Switch, zero duplication)
-	tlW := halfW - 2
+	tlW := halfW - 4
 	daemonSwitch := zone.Mark("ctl:proxy", switchOffStyle.Render("○ STOPPED"))
 	if m.online {
 		daemonSwitch = zone.Mark("ctl:proxy", switchOnStyle.Render("● RUNNING"))
@@ -2024,7 +2024,7 @@ func (m model) renderDashboard(totalW, bodyH int) string {
 	card1 := cardStyle.Width(halfW).Height(topInnerH).MaxHeight(topInnerH + 2).Render(strings.Join(c1Lines, "\n"))
 
 	// ── Top-Right Card: Network & Exit (Exit IP + Geo + Main Route + Traffic)
-	trW := rightHalfW - 2
+	trW := rightHalfW - 4
 	_, chain, exitDelay := m.resolveActiveExit()
 	ipVal := dimStyle.Render("Checking...")
 	locVal := dimStyle.Render("-")
@@ -2073,7 +2073,7 @@ func (m model) renderDashboard(totalW, bodyH int) string {
 	topRow := lipgloss.JoinHorizontal(lipgloss.Top, card1, " ", card2)
 
 	// ── Bottom-Left Card: Clickable Proxy Groups Overview
-	blInnerW := halfW - 2
+	blInnerW := halfW - 4
 	blCap := botInnerH - 2
 	if blCap < 1 {
 		blCap = 1
@@ -2095,13 +2095,13 @@ func (m model) renderDashboard(totalW, bodyH int) string {
 		if nowMax < 8 {
 			nowMax = 8
 		}
-		leftPart := rowTextStyle.Render(ansi.Truncate(g.name, 16, "…")) + dimStyle.Render(" → ") + exitLabelStyle.Render(ansi.Truncate(g.now, nowMax, "…"))
+		leftPart := rowTextStyle.Render(ansi.Truncate(cleanDisplay(g.name), 16, "…")) + dimStyle.Render(" -> ") + exitLabelStyle.Render(ansi.Truncate(cleanDisplay(g.now), nowMax, "…"))
 		blLines = append(blLines, zone.Mark(fmt.Sprintf("dashgrp:%d", i), joinLeftRight(leftPart, delayStr, blInnerW)))
 	}
 	card3 := cardStyle.Width(halfW).Height(botInnerH).MaxHeight(botInnerH + 2).Render(strings.Join(blLines, "\n"))
 
 	// ── Bottom-Right Card: Live Active Connections
-	brInnerW := rightHalfW - 2
+	brInnerW := rightHalfW - 4
 	brCap := botInnerH - 2
 	if brCap < 1 {
 		brCap = 1
@@ -2123,7 +2123,7 @@ func (m model) renderDashboard(totalW, bodyH int) string {
 				break
 			}
 			traffic := formatBytes(c.Download + c.Upload)
-			out := c.Outbound()
+			out := cleanDisplay(c.Outbound())
 			outStyled := exitLabelStyle.Render(ansi.Truncate(out, 16, "…"))
 			if strings.EqualFold(out, "DIRECT") {
 				outStyled = activeMarkStyle.Render("DIRECT")
@@ -2143,6 +2143,38 @@ func (m model) renderDashboard(totalW, bodyH int) string {
 
 	botRow := lipgloss.JoinHorizontal(lipgloss.Top, card3, " ", card4)
 	return lipgloss.JoinVertical(lipgloss.Left, topRow, botRow)
+}
+
+// cleanDisplay normalizes strings for deterministic terminal cell-width rendering:
+//   1. Converts 2-rune Regional Indicator flag emojis (🇯🇵, 🇸🇬, 🇺🇸, 🇹🇼, etc.) into crisp
+//      ASCII country tags ([JP], [SG], [US], [TW]) so terminals that allocate 4 cells per
+//      flag pair never overflow lipgloss's 2-cell calculation or render tofu boxes (☒).
+//   2. Strips Variation Selectors (U+FE0F / U+FE0E) and zero-width joiners (U+200D).
+func cleanDisplay(s string) string {
+	runes := []rune(s)
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if r == '\uFE0F' || r == '\uFE0E' || r == '\u200D' {
+			continue
+		}
+		if r >= 0x1F1E6 && r <= 0x1F1FF && i+1 < len(runes) {
+			r2 := runes[i+1]
+			if r2 >= 0x1F1E6 && r2 <= 0x1F1FF {
+				c1 := byte('A' + (r - 0x1F1E6))
+				c2 := byte('A' + (r2 - 0x1F1E6))
+				b.WriteByte('[')
+				b.WriteByte(c1)
+				b.WriteByte(c2)
+				b.WriteByte(']')
+				i++
+				continue
+			}
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func kvLine(k, v string, maxW int) string {
