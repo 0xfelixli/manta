@@ -272,6 +272,27 @@ func (c *Client) SetMode(mode string) error {
 	return c.doJSON(http.MethodPatch, "/configs", map[string]string{"mode": mode}, nil)
 }
 
+// SetTun hot-toggles mihomo's TUN virtual interface (requires root-started mihomo).
+func (c *Client) SetTun(enable bool) error {
+	return c.doJSON(http.MethodPatch, "/configs", map[string]any{
+		"tun": map[string]any{"enable": enable},
+	}, nil)
+}
+
+// SetAllowLan hot-toggles LAN proxy sharing.
+func (c *Client) SetAllowLan(allow bool) error {
+	return c.doJSON(http.MethodPatch, "/configs", map[string]any{
+		"allow-lan": allow,
+	}, nil)
+}
+
+// ReloadConfig tells mihomo to hot-reload the runtime YAML file without restarting.
+func (c *Client) ReloadConfig(path string) error {
+	return c.doJSON(http.MethodPut, "/configs?force=true", map[string]string{
+		"path": path,
+	}, nil)
+}
+
 // GetProxies returns all proxies and proxy groups.
 func (c *Client) GetProxies() (map[string]ProxyInfo, error) {
 	var res proxiesResp

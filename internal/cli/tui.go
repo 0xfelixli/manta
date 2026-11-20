@@ -14,10 +14,10 @@ var tuiCmd = &cobra.Command{
 	Use:   "tui",
 	Short: "Launch the interactive terminal dashboard",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		_, cfg, _, client, err := loadContext()
+		_, cfg, mgr, client, err := loadContext()
 		if err != nil {
 			return err
 		}
-		return tui.Run(cfg, client)
+		return tui.Run(cfg, mgr, client)
 	},
 }

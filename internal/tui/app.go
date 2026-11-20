@@ -19,6 +19,7 @@ import (
 
 	"manta/internal/api"
 	"manta/internal/config"
+	"manta/internal/core"
 	"manta/internal/sysproxy"
 )
 
@@ -50,6 +51,7 @@ const (
 type stateLoadedMsg struct {
 	version    string
 	mode       string
+	allowLan   bool
 	tunOn      bool
 	tunStack   string
 	proxies    map[string]api.ProxyInfo
@@ -341,6 +343,7 @@ func (d nodeDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 
 type model struct {
 	cfg    *config.AppConfig
+	mgr    *core.Manager
 	client *api.Client
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -353,6 +356,7 @@ type model struct {
 	online     bool
 	version    string
 	mode       string
+	allowLan   bool
 	tunOn      bool
 	tunStack   string
 	sysProxyOn bool
@@ -402,7 +406,7 @@ func newStyledList(title string, delegate list.ItemDelegate) list.Model {
 }
 
 // Run launches the interactive manta terminal dashboard.
-func Run(cfg *config.AppConfig, client *api.Client) error {
+func Run(cfg *config.AppConfig, mgr *core.Manager, client *api.Client) error {
 	zone.NewGlobal()
 	defer zone.Close()
 
@@ -416,6 +420,7 @@ func Run(cfg *config.AppConfig, client *api.Client) error {
 
 	m := model{
 		cfg:           cfg,
+		mgr:           mgr,
 		client:        client,
 		ctx:           ctx,
 		cancel:        cancel,
@@ -509,6 +514,7 @@ func (m model) loadStateCmd() tea.Cmd {
 		return stateLoadedMsg{
 			version:    ver.Version,
 			mode:       liveCfg.Mode,
+			allowLan:   liveCfg.AllowLan,
 			tunOn:      liveCfg.Tun.Enable,
 			tunStack:   liveCfg.Tun.Stack,
 			proxies:    proxies,
@@ -516,6 +522,124 @@ func (m model) loadStateCmd() tea.Cmd {
 			conns:      conns,
 			totalUp:    totalUp,
 			totalDown:  totalDown,
+		}
+	}
+}
+
+func (m model) toggleProxyDaemonCmd() tea.Cmd {
+	wantStart := !m.online
+	return func() tea.Msg {
+		if m.mgr == nil {
+			return actionResultMsg{err: fmt.Errorf("process manager unavailable")}
+		}
+		if wantStart {
+			pid, err := m.mgr.Start()
+			if err != nil {
+				return actionResultMsg{err: err}
+			}
+			return actionResultMsg{
+				status:    fmt.Sprintf("✓ Proxy started (pid %d)", pid),
+				kind:      toastSuccess,
+				reload:    true,
+				refreshIP: true,
+			}
+		}
+		if err := m.mgr.Stop(); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{
+			status: "✓ Proxy daemon stopped",
+			kind:   toastWarn,
+			reload: true,
+		}
+	}
+}
+
+func (m model) toggleTunCmd() tea.Cmd {
+	wantOn := !m.tunOn
+	return func() tea.Msg {
+		if err := m.client.SetTun(wantOn); err != nil {
+			if wantOn {
+				return actionResultMsg{err: fmt.Errorf("TUN requires root privileges (restart with `sudo manta up --tun`): %w", err)}
+			}
+			return actionResultMsg{err: err}
+		}
+		// Verify mihomo actually enabled TUN (non-root mihomo may silently ignore enable=true).
+		if live, err := m.client.GetConfigs(); err == nil && live.Tun.Enable != wantOn {
+			return actionResultMsg{
+				status: "⚠ TUN needs root: run `manta down && sudo manta up --tun`",
+				kind:   toastWarn,
+				reload: true,
+			}
+		}
+		if wantOn {
+			return actionResultMsg{
+				status: "✓ TUN mode enabled (all system & terminal traffic captured)",
+				kind:   toastSuccess,
+				reload: true,
+			}
+		}
+		return actionResultMsg{
+			status: "✓ TUN mode disabled",
+			kind:   toastWarn,
+			reload: true,
+		}
+	}
+}
+
+func (m model) toggleAllowLanCmd() tea.Cmd {
+	wantOn := !m.allowLan
+	return func() tea.Msg {
+		if err := m.client.SetAllowLan(wantOn); err != nil {
+			return actionResultMsg{err: err}
+		}
+		if wantOn {
+			return actionResultMsg{
+				status: fmt.Sprintf("✓ Allow LAN ON (LAN devices can use port %d)", m.cfg.MixedPort),
+				kind:   toastSuccess,
+				reload: true,
+			}
+		}
+		return actionResultMsg{
+			status: "✓ Allow LAN OFF (localhost only)",
+			kind:   toastInfo,
+			reload: true,
+		}
+	}
+}
+
+func (m model) updateSubCmd() tea.Cmd {
+	return func() tea.Msg {
+		if m.mgr == nil {
+			return actionResultMsg{err: fmt.Errorf("config manager unavailable")}
+		}
+		name := m.cfg.ActiveProfile
+		if name == "" {
+			return actionResultMsg{err: fmt.Errorf("no active subscription profile")}
+		}
+		meta, ok := m.cfg.Profiles[name]
+		if !ok || meta.URL == "" {
+			return actionResultMsg{err: fmt.Errorf("profile %q has no subscription URL", name)}
+		}
+		if err := config.FetchProfile(m.mgr.Paths, name, meta.URL); err != nil {
+			return actionResultMsg{err: err}
+		}
+		meta.UpdatedAt = time.Now()
+		m.cfg.Profiles[name] = meta
+		_ = config.Save(m.mgr.Paths, m.cfg)
+
+		m.cfg.TunEnabled = m.tunOn
+		if err := config.BuildRuntimeConfig(m.mgr.Paths, m.cfg); err != nil {
+			return actionResultMsg{err: err}
+		}
+		if err := m.client.ReloadConfig(m.mgr.Paths.RuntimeFile); err != nil {
+			return actionResultMsg{err: fmt.Errorf("downloaded profile, reload failed: %w", err)}
+		}
+		return actionResultMsg{
+			status:    fmt.Sprintf("✓ Updated & hot-reloaded subscription %q", name),
+			kind:      toastSuccess,
+			reload:    true,
+			refreshIP: true,
 		}
 	}
 }
@@ -853,6 +977,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.online = true
 		m.version = msg.version
 		m.mode = msg.mode
+		m.allowLan = msg.allowLan
 		m.tunOn = msg.tunOn
 		m.tunStack = msg.tunStack
 		m.sysProxyOn = msg.sysProxyOn
@@ -1042,6 +1167,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setToast(toastBusy, "Checking exit IP & geolocation...")
 			return m, m.fetchExitIPCmd()
 
+		case "p":
+			m.busy = true
+			if m.online {
+				m.setToast(toastBusy, "Stopping manta proxy daemon...")
+			} else {
+				m.setToast(toastBusy, "Starting manta proxy daemon...")
+			}
+			return m, m.toggleProxyDaemonCmd()
+
+		case "u":
+			m.busy = true
+			m.setToast(toastBusy, "Toggling TUN mode...")
+			return m, m.toggleTunCmd()
+
+		case "a":
+			m.busy = true
+			m.setToast(toastBusy, "Toggling Allow LAN...")
+			return m, m.toggleAllowLanCmd()
+
 		case "s":
 			m.busy = true
 			m.setToast(toastBusy, "Toggling macOS system proxy...")
@@ -1179,6 +1323,30 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.activeTab = tabProxies
 		m.setToast(toastInfo, "Viewing Proxies")
 		return m, nil
+
+	case zone.Get("btn:proxy").InBounds(msg):
+		m.busy = true
+		if m.online {
+			m.setToast(toastBusy, "Stopping manta proxy daemon...")
+		} else {
+			m.setToast(toastBusy, "Starting manta proxy daemon...")
+		}
+		return m, m.toggleProxyDaemonCmd()
+
+	case zone.Get("btn:tun").InBounds(msg):
+		m.busy = true
+		m.setToast(toastBusy, "Toggling TUN mode...")
+		return m, m.toggleTunCmd()
+
+	case zone.Get("btn:lan").InBounds(msg):
+		m.busy = true
+		m.setToast(toastBusy, "Toggling Allow LAN...")
+		return m, m.toggleAllowLanCmd()
+
+	case zone.Get("btn:updatesub").InBounds(msg):
+		m.busy = true
+		m.setToast(toastBusy, "Updating subscription & hot-reloading...")
+		return m, m.updateSubCmd()
 
 	case zone.Get("btn:mode").InBounds(msg):
 		m.busy = true
@@ -1348,17 +1516,46 @@ func (m model) View() string {
 		sysLabel = "SysProxy: ON"
 		sysStyle = btnOnStyle
 	}
-	buttons := []string{
-		zone.Mark("btn:mode", btnAccentStyle.Render("Mode: "+strings.ToUpper(mode))),
-	}
-	if runtime.GOOS == "darwin" {
-		buttons = append(buttons, zone.Mark("btn:sysproxy", sysStyle.Render(sysLabel)))
-	}
+	var buttons []string
 	if m.activeTab == tabDashboard {
+		proxyLabel := "Proxy: OFF"
+		proxyStyle := btnStyle
+		if m.online {
+			proxyLabel = "Proxy: ON"
+			proxyStyle = btnOnStyle
+		}
+		tunLabel := "TUN: OFF"
+		tunStyle := btnStyle
+		if m.tunOn {
+			tunLabel = "TUN: ON"
+			tunStyle = btnOnStyle
+		}
+		lanLabel := "LAN: OFF"
+		lanStyle := btnStyle
+		if m.allowLan {
+			lanLabel = "LAN: ON"
+			lanStyle = btnOnStyle
+		}
 		buttons = append(buttons,
-			zone.Mark("btn:checkip", btnStyle.Render("Check Exit IP")),
+			zone.Mark("btn:proxy", proxyStyle.Render(proxyLabel)),
+			zone.Mark("btn:mode", btnAccentStyle.Render("Mode: "+strings.ToUpper(mode))),
+			zone.Mark("btn:tun", tunStyle.Render(tunLabel)),
+		)
+		if runtime.GOOS == "darwin" {
+			buttons = append(buttons, zone.Mark("btn:sysproxy", sysStyle.Render(sysLabel)))
+		}
+		buttons = append(buttons,
+			zone.Mark("btn:lan", lanStyle.Render(lanLabel)),
+			zone.Mark("btn:checkip", btnStyle.Render("Check IP")),
+			zone.Mark("btn:updatesub", btnStyle.Render("Update Sub")),
 		)
 	} else {
+		buttons = append(buttons,
+			zone.Mark("btn:mode", btnAccentStyle.Render("Mode: "+strings.ToUpper(mode))),
+		)
+		if runtime.GOOS == "darwin" {
+			buttons = append(buttons, zone.Mark("btn:sysproxy", sysStyle.Render(sysLabel)))
+		}
 		sortLabel := "Sort: Default"
 		sortStyle := btnStyle
 		if m.sortByFast {
@@ -1422,7 +1619,7 @@ func (m model) View() string {
 		toastRendered = toastInfoStyle.Width(w).Render(toastMsg)
 	}
 
-	help := dimStyle.Render(ansi.Truncate("1/2: Dashboard/Proxies  •  i: check IP  •  s: sysproxy  •  m: mode  •  o: sort speed  •  /: search  •  r: refresh  •  q: quit", w, "…"))
+	help := dimStyle.Render(ansi.Truncate("1/2: Dashboard/Proxies  •  p: proxy on/off  •  u: TUN  •  s: sysproxy  •  a: LAN  •  m: mode  •  i: IP  •  o: sort  •  q: quit", w, "…"))
 
 	return zone.Scan(lipgloss.JoinVertical(lipgloss.Left, header, exitSummary, actionBar, body, toastRendered, help))
 }
