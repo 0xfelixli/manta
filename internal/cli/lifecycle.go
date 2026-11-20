@@ -90,10 +90,19 @@ var upCmd = &cobra.Command{
 			return err
 		}
 		if upWithTun {
-			if os.Geteuid() != 0 {
-				return fmt.Errorf("TUN mode requires root privileges to create utun & routes; run: sudo manta up --tun")
-			}
 			cfg.TunEnabled = true
+			_ = config.Save(paths, cfg)
+			if !mgr.HasRootCapability() {
+				fmt.Println("Requesting macOS administrator authorization for TUN mode...")
+				pid, err := mgr.StartTunElevated()
+				if err != nil {
+					return err
+				}
+				fmt.Printf("manta is up (pid %d)\n", pid)
+				fmt.Printf("HTTP / SOCKS5 proxy: 127.0.0.1:%d\n", cfg.MixedPort)
+				fmt.Println("TUN mode:            enabled (all system & terminal traffic captured)")
+				return nil
+			}
 		} else {
 			cfg.TunEnabled = false
 		}

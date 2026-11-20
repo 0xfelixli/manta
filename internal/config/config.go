@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -71,14 +72,36 @@ func DefaultPaths() (Paths, error) {
 }
 
 func resolveUserHome() (string, error) {
-	if os.Geteuid() == 0 {
-		if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
-			if u, err := user.Lookup(sudoUser); err == nil && u.HomeDir != "" {
-				return u.HomeDir, nil
-			}
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+		if u, err := user.Lookup(sudoUser); err == nil && u.HomeDir != "" {
+			return u.HomeDir, nil
+		}
+	}
+	if uid := os.Getuid(); uid != 0 {
+		if u, err := user.LookupId(strconv.Itoa(uid)); err == nil && u.HomeDir != "" {
+			return u.HomeDir, nil
 		}
 	}
 	return os.UserHomeDir()
+}
+
+func fixOwner(path string) {
+	if os.Geteuid() != 0 {
+		return
+	}
+	if uid := os.Getuid(); uid != 0 {
+		_ = os.Chown(path, uid, os.Getgid())
+		return
+	}
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+		if u, err := user.Lookup(sudoUser); err == nil {
+			uid, err1 := strconv.Atoi(u.Uid)
+			gid, err2 := strconv.Atoi(u.Gid)
+			if err1 == nil && err2 == nil {
+				_ = os.Chown(path, uid, gid)
+			}
+		}
+	}
 }
 
 // DefaultConfig returns sensible defaults for a local HTTP/SOCKS5 proxy setup.
@@ -98,6 +121,7 @@ func (p Paths) EnsureDirs() error {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("create dir %s: %w", dir, err)
 		}
+		fixOwner(dir)
 	}
 	return nil
 }
@@ -147,6 +171,7 @@ func Save(p Paths, cfg *AppConfig) error {
 	if err := os.WriteFile(p.ConfigFile, data, 0o600); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
+	fixOwner(p.ConfigFile)
 	return nil
 }
 
@@ -185,6 +210,7 @@ func FetchProfile(p Paths, name, subURL string) error {
 	if err := os.WriteFile(p.ProfilePath(name), raw, 0o600); err != nil {
 		return fmt.Errorf("write profile: %w", err)
 	}
+	fixOwner(p.ProfilePath(name))
 	return nil
 }
 
@@ -261,5 +287,6 @@ func BuildRuntimeConfig(p Paths, cfg *AppConfig) error {
 	if err := os.WriteFile(p.RuntimeFile, out, 0o644); err != nil {
 		return fmt.Errorf("write runtime config: %w", err)
 	}
+	fixOwner(p.RuntimeFile)
 	return nil
 }

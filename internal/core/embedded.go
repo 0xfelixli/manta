@@ -33,6 +33,13 @@ func EmbeddedVersion() string {
 // RunEmbeddedDaemon runs the embedded mihomo core in the current process until
 // SIGINT/SIGTERM or a local manta.shutdown sentinel file appears.
 func RunEmbeddedDaemon(homeDir, configFile string) error {
+	// If the binary has setuid-root permissions (euid == 0), promote real uid/gid to 0
+	// so utun creation and /sbin/route table updates succeed without needing sudo.
+	if os.Geteuid() == 0 && os.Getuid() != 0 {
+		_ = syscall.Setuid(0)
+		_ = syscall.Setgid(0)
+	}
+
 	_, _ = maxprocs.Set(maxprocs.Logger(func(string, ...any) {}))
 
 	if homeDir != "" {

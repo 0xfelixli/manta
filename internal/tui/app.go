@@ -684,23 +684,42 @@ func (m model) cycleModeCmd() tea.Cmd {
 func (m model) toggleTunCmd() tea.Cmd {
 	wantOn := !m.tunOn
 	return func() tea.Msg {
-		if err := m.client.SetTun(wantOn); err != nil {
-			if wantOn {
-				return actionResultMsg{err: fmt.Errorf("TUN needs root (`sudo manta up --tun`): %w", err)}
+		if !wantOn {
+			if err := m.client.SetTun(false); err != nil {
+				return actionResultMsg{err: err}
 			}
-			return actionResultMsg{err: err}
+			if m.mgr != nil && m.cfg != nil {
+				m.cfg.TunEnabled = false
+				_ = config.Save(m.mgr.Paths, m.cfg)
+			}
+			return actionResultMsg{status: "✓ TUN mode OFF", kind: toastWarn, reload: true}
 		}
-		if live, err := m.client.GetConfigs(); err == nil && live.Tun.Enable != wantOn {
-			return actionResultMsg{
-				status: "⚠ TUN needs root: run `manta down && sudo manta up --tun`",
-				kind:   toastWarn,
-				reload: true,
+
+		// Try hot-enabling TUN on the currently running daemon first.
+		if m.online {
+			_ = m.client.SetTun(true)
+			if live, err := m.client.GetConfigs(); err == nil && live.Tun.Enable {
+				if m.mgr != nil && m.cfg != nil {
+					m.cfg.TunEnabled = true
+					_ = config.Save(m.mgr.Paths, m.cfg)
+				}
+				return actionResultMsg{status: "✓ TUN mode ON (full-system capture)", kind: toastSuccess, reload: true}
 			}
 		}
-		if wantOn {
-			return actionResultMsg{status: "✓ TUN mode ON (full-system capture)", kind: toastSuccess, reload: true}
+
+		// Current daemon is offline or lacks root privileges — elevate via native macOS authorization dialog.
+		if m.mgr == nil {
+			return actionResultMsg{err: fmt.Errorf("process manager unavailable")}
 		}
-		return actionResultMsg{status: "✓ TUN mode OFF", kind: toastWarn, reload: true}
+		if _, err := m.mgr.StartTunElevated(); err != nil {
+			return actionResultMsg{err: err, reload: true}
+		}
+		return actionResultMsg{
+			status:    "✓ TUN mode ON (authorized & full-system capture active)",
+			kind:      toastSuccess,
+			reload:    true,
+			refreshIP: true,
+		}
 	}
 }
 

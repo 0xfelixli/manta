@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -215,4 +216,98 @@ func (m *Manager) PowerOffAll() error {
 		return nil
 	}
 	return err
+}
+
+// HasRootCapability checks whether the current process is root or the manta binary has setuid-root bit set.
+func (m *Manager) HasRootCapability() bool {
+	if os.Geteuid() == 0 {
+		return true
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	if realExe, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = realExe
+	}
+	st, err := os.Stat(exe)
+	if err != nil {
+		return false
+	}
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false
+	}
+	return sys.Uid == 0 && (st.Mode()&os.ModeSetuid) != 0
+}
+
+// StartTunElevated restarts (or starts) the manta daemon with TUN enabled,
+// invoking the native macOS Touch ID / password authorization dialog if the binary
+// does not yet have root/setuid capability.
+func (m *Manager) StartTunElevated() (int, error) {
+	m.Cfg.TunEnabled = true
+	_ = config.Save(m.Paths, m.Cfg)
+
+	if running, _ := m.IsRunning(); running {
+		_ = m.Stop()
+	}
+
+	// Fast path: already root or binary already granted setuid-root!
+	if m.HasRootCapability() {
+		return m.Start()
+	}
+
+	if runtime.GOOS != "darwin" {
+		return 0, errors.New("TUN mode requires root privileges; run: sudo manta up --tun")
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		return 0, fmt.Errorf("resolve executable: %w", err)
+	}
+	realExe := exe
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		realExe = resolved
+	}
+
+	userEnv := os.Getenv("USER")
+	// Grant setuid-root to the binary (so future toggles never need a password prompt)
+	// and launch the TUN daemon immediately.
+	shellCmd := fmt.Sprintf(
+		"chown root:wheel '%s' && chmod u+s '%s' && SUDO_USER='%s' '%s' up --tun",
+		escapeSingleQuotes(realExe),
+		escapeSingleQuotes(realExe),
+		escapeSingleQuotes(userEnv),
+		escapeSingleQuotes(realExe),
+	)
+	script := fmt.Sprintf("do shell script %q with administrator privileges", shellCmd)
+	out, err := exec.Command("osascript", "-e", script).CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if strings.Contains(strings.ToLower(msg), "user canceled") || strings.Contains(msg, "-128") {
+			m.Cfg.TunEnabled = false
+			_ = config.Save(m.Paths, m.Cfg)
+			return 0, errors.New("authorization canceled")
+		}
+		if msg == "" {
+			msg = err.Error()
+		}
+		return 0, fmt.Errorf("macOS authorization failed: %s", msg)
+	}
+
+	// Wait briefly for controller readiness.
+	client := api.NewClient(m.Cfg.Controller, m.Cfg.Secret)
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := client.Version(); err == nil {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	pid, _ := m.ReadPID()
+	return pid, nil
+}
+
+func escapeSingleQuotes(s string) string {
+	return strings.ReplaceAll(s, "'", "'\\''")
 }
