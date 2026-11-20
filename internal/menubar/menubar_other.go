@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"runtime"
 
-	"manta/internal/api"
-	"manta/internal/config"
+	"github.com/0xfelixli/manta/internal/api"
+	"github.com/0xfelixli/manta/internal/config"
 )
 
 func Run(_ *config.AppConfig, _ *api.Client) error {

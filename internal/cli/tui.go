@@ -3,7 +3,7 @@ package cli
 import (
 	"github.com/spf13/cobra"
 
-	"manta/internal/tui"
+	"github.com/0xfelixli/manta/internal/tui"
 )
 
 func init() {

@@ -15,15 +15,25 @@ A sleek Go CLI, TUI & macOS menu bar proxy manager powered by `mihomo` (Clash Me
 - **Native macOS menu bar (`manta menubar -d`)**: live speed / exit country badge in the top-right menu bar with quick mode, SysProxy, and node switching
 - **Built-in AI Agent Skill**: `.agents/skills/manta-proxy/` runbook and health-check script so AI agents can operate `manta` non-interactively
 
-## Prerequisites
+## Install
+
+### Homebrew (macOS — Recommended, installs `mihomo` automatically)
+
+```bash
+brew install 0xfelixli/tap/manta
+```
+
+### Go Install
+
+```bash
+brew install mihomo
+go install github.com/0xfelixli/manta/cmd/manta@latest
+```
+
+### Build from Source
 
 ```bash
 brew install go mihomo
-```
-
-## Build & Install
-
-```bash
 go mod tidy
 CGO_ENABLED=1 go build -o manta ./cmd/manta
 mkdir -p ~/.local/bin && rm -f ~/.local/bin/manta && cp manta ~/.local/bin/manta

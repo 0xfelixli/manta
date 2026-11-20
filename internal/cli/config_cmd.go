@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"manta/internal/config"
+	"github.com/0xfelixli/manta/internal/config"
 )
 
 func init() {

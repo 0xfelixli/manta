@@ -17,10 +17,10 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	zone "github.com/lrstanley/bubblezone"
 
-	"manta/internal/api"
-	"manta/internal/config"
-	"manta/internal/core"
-	"manta/internal/sysproxy"
+	"github.com/0xfelixli/manta/internal/api"
+	"github.com/0xfelixli/manta/internal/config"
+	"github.com/0xfelixli/manta/internal/core"
+	"github.com/0xfelixli/manta/internal/sysproxy"
 )
 
 type tabView int

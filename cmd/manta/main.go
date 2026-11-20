@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"manta/internal/cli"
+	"github.com/0xfelixli/manta/internal/cli"
 )
 
 func main() {

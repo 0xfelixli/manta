@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"manta/internal/sysproxy"
+	"github.com/0xfelixli/manta/internal/sysproxy"
 )
 
 var sysproxyService string

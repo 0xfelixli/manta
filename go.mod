@@ -1,4 +1,4 @@
-module manta
+module github.com/0xfelixli/manta
 
 go 1.22
 

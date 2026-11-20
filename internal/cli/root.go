@@ -3,9 +3,9 @@ package cli
 import (
 	"github.com/spf13/cobra"
 
-	"manta/internal/api"
-	"manta/internal/config"
-	"manta/internal/core"
+	"github.com/0xfelixli/manta/internal/api"
+	"github.com/0xfelixli/manta/internal/config"
+	"github.com/0xfelixli/manta/internal/core"
 )
 
 var rootCmd = &cobra.Command{
