@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -62,6 +63,20 @@ var initCmd = &cobra.Command{
 		} else {
 			fmt.Printf("Warning: %v\n", err)
 		}
+
+		// Auto-install fish shell completions if ~/.config/fish exists.
+		if home, err := os.UserHomeDir(); err == nil {
+			fishDir := filepath.Join(home, ".config", "fish")
+			if st, err := os.Stat(fishDir); err == nil && st.IsDir() {
+				compDir := filepath.Join(fishDir, "completions")
+				if err := os.MkdirAll(compDir, 0o755); err == nil {
+					compFile := filepath.Join(compDir, "manta.fish")
+					if err := rootCmd.GenFishCompletionFile(compFile, true); err == nil {
+						fmt.Printf("Fish completions:          %s\n", compFile)
+					}
+				}
+			}
+		}
 		return nil
 	},
 }
@@ -109,25 +124,16 @@ var upCmd = &cobra.Command{
 
 var downCmd = &cobra.Command{
 	Use:   "down",
-	Short: "Stop the mihomo proxy daemon",
+	Short: "Stop the proxy daemon, disable macOS system proxy, and close menu bar",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		_, _, mgr, _, err := loadContext()
 		if err != nil {
 			return err
 		}
-		if err := mgr.Stop(); err != nil {
+		if err := mgr.PowerOffAll(); err != nil {
 			return err
 		}
-		fmt.Println("manta stopped")
-		if downWithSysProxy {
-			if services, err := sysproxy.ResolveServices(""); err == nil {
-				if err := sysproxy.Disable(services); err == nil {
-					fmt.Printf("System proxy disabled on [%s]\n", strings.Join(services, ", "))
-				} else {
-					fmt.Printf("Warning: failed to disable system proxy: %v\n", err)
-				}
-			}
-		}
+		fmt.Println("manta stopped (daemon, system proxy, and menu bar cleaned up)")
 		return nil
 	},
 }

@@ -40,6 +40,22 @@ var configSetCmd = &cobra.Command{
 	Use:   "set <key> <value>",
 	Short: "Persist a preference (sort_by_speed, mode, allow_lan, mixed_port, last_tab)",
 	Args:  cobra.ExactArgs(2),
+	ValidArgsFunction: func(_ *cobra.Command, args []string, _ string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return []string{"sort_by_speed", "mode", "allow_lan", "mixed_port", "last_tab"}, cobra.ShellCompDirectiveNoFileComp
+		}
+		if len(args) == 1 {
+			switch args[0] {
+			case "sort_by_speed", "allow_lan":
+				return []string{"true", "false"}, cobra.ShellCompDirectiveNoFileComp
+			case "mode":
+				return []string{"rule", "global", "direct"}, cobra.ShellCompDirectiveNoFileComp
+			case "last_tab":
+				return []string{"dashboard", "proxies"}, cobra.ShellCompDirectiveNoFileComp
+			}
+		}
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		key := strings.ToLower(strings.TrimSpace(args[0]))
 		val := strings.TrimSpace(args[1])

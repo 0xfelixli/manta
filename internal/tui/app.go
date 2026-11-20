@@ -104,6 +104,8 @@ type toastExpireMsg struct {
 	seq int
 }
 
+type powerOffDoneMsg struct{}
+
 // Oceanic Mineral design system — adaptive for both light (white) and dark terminals.
 // 80% calm mineral neutrals (Zinc), 15% oceanic teal/blue focus, 5% restrained semantic accents.
 var (
@@ -629,11 +631,22 @@ func (m model) toggleProxyDaemonCmd() tea.Cmd {
 		if err := m.mgr.Stop(); err != nil {
 			return actionResultMsg{err: err}
 		}
+		off := false
 		return actionResultMsg{
-			status: "✓ Proxy daemon stopped",
-			kind:   toastWarn,
-			reload: true,
+			status:     "✓ Proxy stopped & macOS system proxy disabled",
+			kind:       toastWarn,
+			reload:     true,
+			sysProxyOn: &off,
 		}
+	}
+}
+
+func (m model) powerOffAndQuitCmd() tea.Cmd {
+	return func() tea.Msg {
+		if m.mgr != nil {
+			_ = m.mgr.PowerOffAll()
+		}
+		return powerOffDoneMsg{}
 	}
 }
 
@@ -1060,6 +1073,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case powerOffDoneMsg:
+		m.cancel()
+		return m, tea.Quit
+
 	case stateLoadedMsg:
 		m.busy = false
 		if msg.err != nil {
@@ -1259,6 +1276,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancel()
 			return m, tea.Quit
 
+		case "Q":
+			m.busy = true
+			m.setToast(toastBusy, "Powering off daemon, system proxy & menu bar...")
+			return m, m.powerOffAndQuitCmd()
+
 		case "1":
 			m.activeTab = tabDashboard
 			m.savePrefs()
@@ -1421,7 +1443,7 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Global top nav tabs
+	// Global top nav tabs & Power Off button
 	switch {
 	case zone.Get("tab:dashboard").InBounds(msg):
 		m.activeTab = tabDashboard
@@ -1434,6 +1456,10 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	case zone.Get("tab:settings").InBounds(msg):
 		m.activeTab = tabSettings
 		return m, nil
+	case zone.Get("btn:poweroff").InBounds(msg):
+		m.busy = true
+		m.setToast(toastBusy, "Powering off daemon, system proxy & menu bar...")
+		return m, m.powerOffAndQuitCmd()
 	}
 
 	// Settings tab controls
@@ -1683,11 +1709,13 @@ func (m model) View() string {
 	if m.online {
 		connBadge = pillOnlineStyle.Render("● ONLINE")
 	}
+	powerBtn := zone.Mark("btn:poweroff", pillOfflineStyle.Render("⏻ Power Off"))
 	rightNav := fmt.Sprintf(
-		"%s   %s  %s",
+		"%s   %s  %s   %s",
 		connBadge,
 		speedUpStyle.Render("↑ "+formatSpeed(m.up)),
 		speedDownStyle.Render("↓ "+formatSpeed(m.down)),
+		powerBtn,
 	)
 	header := joinLeftRight(leftNav, rightNav, w)
 	divider := headerRuleStyle.Render(strings.Repeat("─", w))
@@ -1733,11 +1761,11 @@ func (m model) renderFooter(w int) string {
 	var hints string
 	switch m.activeTab {
 	case tabDashboard:
-		hints = "1/2/3: Tabs  •  Click any switch above  •  p: Daemon  •  u: TUN  •  s: SysProxy  •  m: Mode  •  i: Check IP  •  r: Refresh  •  q: Quit"
+		hints = "1/2/3: Tabs  •  p: Daemon  •  u: TUN  •  s: SysProxy  •  m: Mode  •  i: Check IP  •  q: Close UI  •  Q: Power Off All"
 	case tabProxies:
-		hints = "1/2/3: Tabs  •  Click/Enter: Switch Node  •  /: Search  •  o: Sort Speed  •  t/T: Test Node/Group  •  Tab: Pane  •  q: Quit"
+		hints = "1/2/3: Tabs  •  Click/Enter: Switch Node  •  /: Search  •  o: Sort Speed  •  t/T: Test  •  q: Close UI  •  Q: Power Off All"
 	case tabSettings:
-		hints = "1/2/3: Tabs  •  Click any setting to toggle & auto-save to ~/.config/manta/config.yaml  •  q: Quit"
+		hints = "1/2/3: Tabs  •  Click any setting to toggle & auto-save  •  q: Close UI  •  Q: Power Off All"
 	}
 	return dimStyle.Render(ansi.Truncate(hints, w, "…"))
 }

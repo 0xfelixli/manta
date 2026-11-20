@@ -6,6 +6,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/metacubex/mihomo/component/updater"
 	mihomoconfig "github.com/metacubex/mihomo/config"
@@ -29,7 +30,8 @@ func EmbeddedVersion() string {
 	return C.Version
 }
 
-// RunEmbeddedDaemon runs the embedded mihomo core in the current process until SIGINT/SIGTERM.
+// RunEmbeddedDaemon runs the embedded mihomo core in the current process until
+// SIGINT/SIGTERM or a local manta.shutdown sentinel file appears.
 func RunEmbeddedDaemon(homeDir, configFile string) error {
 	_, _ = maxprocs.Set(maxprocs.Logger(func(string, ...any) {}))
 
@@ -40,6 +42,9 @@ func RunEmbeddedDaemon(homeDir, configFile string) error {
 		}
 		C.SetHomeDir(homeDir)
 	}
+
+	shutdownSentinel := filepath.Join(C.Path.HomeDir(), "manta.shutdown")
+	_ = os.Remove(shutdownSentinel)
 
 	if configFile != "" {
 		if !filepath.IsAbs(configFile) {
@@ -70,10 +75,19 @@ func RunEmbeddedDaemon(homeDir, configFile string) error {
 	signal.Notify(termSign, syscall.SIGINT, syscall.SIGTERM)
 	signal.Notify(hupSign, syscall.SIGHUP)
 
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-termSign:
+			_ = os.Remove(shutdownSentinel)
 			return nil
+		case <-ticker.C:
+			if _, err := os.Stat(shutdownSentinel); err == nil {
+				_ = os.Remove(shutdownSentinel)
+				return nil
+			}
 		case <-hupSign:
 			if err := hub.Parse(nil); err != nil {
 				log.Errorln("Reload config error: %s", err.Error())

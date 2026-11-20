@@ -78,10 +78,27 @@ var subListCmd = &cobra.Command{
 	},
 }
 
+func completeProfileNames(_ *cobra.Command, args []string, _ string) ([]string, cobra.ShellCompDirective) {
+	if len(args) > 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	_, cfg, _, _, err := loadContext()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	names := make([]string, 0, len(cfg.Profiles))
+	for name := range cfg.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, cobra.ShellCompDirectiveNoFileComp
+}
+
 var subUseCmd = &cobra.Command{
-	Use:   "use <name>",
-	Short: "Switch the active profile (restarts daemon if running)",
-	Args:  cobra.ExactArgs(1),
+	Use:               "use <name>",
+	Short:             "Switch the active profile (restarts daemon if running)",
+	Args:              cobra.ExactArgs(1),
+	ValidArgsFunction: completeProfileNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 		paths, cfg, mgr, _, err := loadContext()
@@ -110,9 +127,10 @@ var subUseCmd = &cobra.Command{
 }
 
 var subUpdateCmd = &cobra.Command{
-	Use:   "update [name]",
-	Short: "Refresh a subscription profile (defaults to active profile)",
-	Args:  cobra.MaximumNArgs(1),
+	Use:               "update [name]",
+	Short:             "Refresh a subscription profile (defaults to active profile)",
+	Args:              cobra.MaximumNArgs(1),
+	ValidArgsFunction: completeProfileNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		paths, cfg, _, _, err := loadContext()
 		if err != nil {

@@ -15,12 +15,14 @@ import (
 
 // Paths holds all filesystem locations managed by manta.
 type Paths struct {
-	RootDir     string
-	ConfigFile  string
-	ProfilesDir string
-	RuntimeFile string
-	PIDFile     string
-	LogFile     string
+	RootDir        string
+	ConfigFile     string
+	ProfilesDir    string
+	RuntimeFile    string
+	PIDFile        string
+	MenubarPIDFile string
+	ShutdownFile   string
+	LogFile        string
 }
 
 // ProfileMeta stores metadata for a saved subscription profile.
@@ -57,12 +59,14 @@ func DefaultPaths() (Paths, error) {
 	}
 	root := filepath.Join(home, ".config", "manta")
 	return Paths{
-		RootDir:     root,
-		ConfigFile:  filepath.Join(root, "config.yaml"),
-		ProfilesDir: filepath.Join(root, "profiles"),
-		RuntimeFile: filepath.Join(root, "runtime.yaml"),
-		PIDFile:     filepath.Join(root, "manta.pid"),
-		LogFile:     filepath.Join(root, "mihomo.log"),
+		RootDir:        root,
+		ConfigFile:     filepath.Join(root, "config.yaml"),
+		ProfilesDir:    filepath.Join(root, "profiles"),
+		RuntimeFile:    filepath.Join(root, "runtime.yaml"),
+		PIDFile:        filepath.Join(root, "manta.pid"),
+		MenubarPIDFile: filepath.Join(root, "menubar.pid"),
+		ShutdownFile:   filepath.Join(root, "manta.shutdown"),
+		LogFile:        filepath.Join(root, "mihomo.log"),
 	}, nil
 }
 

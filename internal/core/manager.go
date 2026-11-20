@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -12,9 +13,10 @@ import (
 
 	"github.com/0xfelixli/manta/internal/api"
 	"github.com/0xfelixli/manta/internal/config"
+	"github.com/0xfelixli/manta/internal/sysproxy"
 )
 
-// Manager controls the background proxy daemon lifecycle.
+// Manager controls the background proxy daemon and menu bar lifecycle.
 type Manager struct {
 	Paths config.Paths
 	Cfg   *config.AppConfig
@@ -24,7 +26,7 @@ func NewManager(paths config.Paths, cfg *config.AppConfig) *Manager {
 	return &Manager{Paths: paths, Cfg: cfg}
 }
 
-// FindBinary returns the active engine description (embedded by default, or external core_bin if configured).
+// FindBinary returns the active engine description.
 func (m *Manager) FindBinary() (string, error) {
 	if m.Cfg.CoreBin != "" {
 		if _, err := os.Stat(m.Cfg.CoreBin); err == nil {
@@ -71,6 +73,8 @@ func (m *Manager) Start() (int, error) {
 		return pid, fmt.Errorf("manta is already running (pid %d)", pid)
 	}
 
+	_ = os.Remove(m.Paths.ShutdownFile)
+
 	if err := config.BuildRuntimeConfig(m.Paths, m.Cfg); err != nil {
 		return 0, err
 	}
@@ -109,7 +113,6 @@ func (m *Manager) Start() (int, error) {
 		return 0, fmt.Errorf("write pid file: %w", err)
 	}
 
-	// Wait briefly for External Controller to become ready.
 	client := api.NewClient(m.Cfg.Controller, m.Cfg.Secret)
 	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
@@ -126,31 +129,90 @@ func (m *Manager) Start() (int, error) {
 	return pid, nil
 }
 
-// Stop terminates the running daemon process and removes the PID file.
+// Stop terminates the running daemon process (supporting non-root shutdown of root TUN daemons
+// via the shutdown sentinel file) and automatically disables macOS system proxy so the host never loses internet.
 func (m *Manager) Stop() error {
+	m.DisableSysProxyQuiet()
+
 	running, pid := m.IsRunning()
 	if !running {
 		_ = os.Remove(m.Paths.PIDFile)
+		_ = os.Remove(m.Paths.ShutdownFile)
 		return errors.New("manta is not running")
 	}
 
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-		if errors.Is(err, syscall.EPERM) {
-			return fmt.Errorf("permission denied stopping pid %d (started with sudo/TUN); run: sudo manta down", pid)
-		}
-		return fmt.Errorf("send SIGTERM to pid %d: %w", pid, err)
-	}
+	// Write shutdown sentinel so embedded daemon (even root-owned TUN) shuts itself down cleanly.
+	_ = os.WriteFile(m.Paths.ShutdownFile, []byte("stop\n"), 0o644)
 
-	deadline := time.Now().Add(3 * time.Second)
+	// Also send SIGTERM directly if we have permission.
+	killErr := syscall.Kill(pid, syscall.SIGTERM)
+
+	deadline := time.Now().Add(3500 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); err != nil && !errors.Is(err, syscall.EPERM) {
+		err := syscall.Kill(pid, 0)
+		if err != nil && !errors.Is(err, syscall.EPERM) {
 			_ = os.Remove(m.Paths.PIDFile)
+			_ = os.Remove(m.Paths.ShutdownFile)
 			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
+	if killErr != nil && errors.Is(killErr, syscall.EPERM) {
+		// External root-owned mihomo binary from older run that doesn't watch manta.shutdown:
+		// disable TUN via controller API so routes are restored immediately.
+		client := api.NewClient(m.Cfg.Controller, m.Cfg.Secret)
+		_ = client.SetTun(false)
+		return fmt.Errorf("root daemon (pid %d) requires `sudo manta down` (TUN routes already disabled)", pid)
+	}
+
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 	_ = os.Remove(m.Paths.PIDFile)
+	_ = os.Remove(m.Paths.ShutdownFile)
 	return nil
+}
+
+// DisableSysProxyQuiet turns off macOS system proxy if currently enabled.
+func (m *Manager) DisableSysProxyQuiet() {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	services, err := sysproxy.ResolveServices("")
+	if err != nil || len(services) == 0 {
+		return
+	}
+	statuses, err := sysproxy.Status(services)
+	if err != nil {
+		return
+	}
+	for _, st := range statuses {
+		if strings.HasPrefix(st.HTTP, "on ") || strings.HasPrefix(st.SOCKS, "on ") {
+			_ = sysproxy.Disable(services)
+			return
+		}
+	}
+}
+
+// StopMenubar terminates the background macOS menu bar process if running.
+func (m *Manager) StopMenubar() {
+	data, err := os.ReadFile(m.Paths.MenubarPIDFile)
+	if err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
+			if pid != os.Getpid() {
+				_ = syscall.Kill(pid, syscall.SIGTERM)
+			}
+		}
+		_ = os.Remove(m.Paths.MenubarPIDFile)
+	}
+}
+
+// PowerOffAll stops the proxy daemon, turns off macOS system proxy, and stops the menu bar process.
+func (m *Manager) PowerOffAll() error {
+	m.DisableSysProxyQuiet()
+	m.StopMenubar()
+	err := m.Stop()
+	if err != nil && strings.Contains(err.Error(), "not running") {
+		return nil
+	}
+	return err
 }

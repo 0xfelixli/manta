@@ -16,13 +16,14 @@ import (
 
 	"github.com/0xfelixli/manta/internal/api"
 	"github.com/0xfelixli/manta/internal/config"
+	"github.com/0xfelixli/manta/internal/core"
 	"github.com/0xfelixli/manta/internal/sysproxy"
 )
 
 const maxQuickNodes = 25
 
 // Run starts the macOS menu bar status item (blocks on the Cocoa main thread).
-func Run(cfg *config.AppConfig, client *api.Client) error {
+func Run(cfg *config.AppConfig, mgr *core.Manager, client *api.Client) error {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	onReady := func() {
@@ -67,7 +68,9 @@ func Run(cfg *config.AppConfig, client *api.Client) error {
 
 		mCheckIP := systray.AddMenuItem("Refresh Exit IP", "Re-query exit IP and geolocation")
 		mOpenTUI := systray.AddMenuItem("Open Dashboard (TUI)", "Open manta tui in Terminal")
-		mQuit := systray.AddMenuItem("Quit Menu Bar", "Close menu bar item (keeps proxy running)")
+		systray.AddSeparator()
+		mPowerOff := systray.AddMenuItem("⏻ Power Off All (Stop Proxy & Quit)", "Stop proxy daemon, disable system proxy, and exit menu bar")
+		mQuit := systray.AddMenuItem("Close Menu Bar Icon", "Close menu bar item (keeps proxy running)")
 
 		var (
 			mu           sync.Mutex
@@ -296,6 +299,12 @@ func Run(cfg *config.AppConfig, client *api.Client) error {
 					go refreshExitIP()
 				case <-mOpenTUI.ClickedCh:
 					openTUIInTerminal()
+				case <-mPowerOff.ClickedCh:
+					if mgr != nil {
+						_ = mgr.Stop()
+					}
+					systray.Quit()
+					return
 				case <-mQuit.ClickedCh:
 					systray.Quit()
 					return
