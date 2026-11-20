@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 
 	"manta/internal/api"
 	"manta/internal/config"
+	"manta/internal/sysproxy"
 )
 
 type pane int
@@ -28,10 +30,11 @@ const (
 
 // Messages
 type stateLoadedMsg struct {
-	version string
-	mode    string
-	proxies map[string]api.ProxyInfo
-	err     error
+	version    string
+	mode       string
+	proxies    map[string]api.ProxyInfo
+	sysProxyOn bool
+	err        error
 }
 
 type trafficStartedMsg struct {
@@ -44,9 +47,10 @@ type trafficSampleMsg struct {
 }
 
 type actionResultMsg struct {
-	status string
-	err    error
-	reload bool
+	status     string
+	err        error
+	reload     bool
+	sysProxyOn *bool
 }
 
 type delayResultMsg struct {
@@ -59,7 +63,7 @@ var (
 	badgeStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.AdaptiveColor{Light: "#0284C7", Dark: "#0EA5E9"}).
+			Background(lipgloss.AdaptiveColor{Light: "#0F172A", Dark: "#0EA5E9"}).
 			Padding(0, 1)
 
 	headerMetaStyle = lipgloss.NewStyle().
@@ -74,15 +78,20 @@ var (
 			Bold(true)
 
 	btnStyle = lipgloss.NewStyle().
-			Bold(true).
 			Foreground(lipgloss.AdaptiveColor{Light: "#1E293B", Dark: "#E2E8F0"}).
 			Background(lipgloss.AdaptiveColor{Light: "#E2E8F0", Dark: "#334155"}).
 			Padding(0, 1)
 
 	btnAccentStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.AdaptiveColor{Light: "#0284C7", Dark: "#0EA5E9"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#0369A1", Dark: "#E0F2FE"}).
+			Background(lipgloss.AdaptiveColor{Light: "#E0F2FE", Dark: "#0369A1"}).
+			Padding(0, 1)
+
+	btnOnStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.AdaptiveColor{Light: "#065F46", Dark: "#D1FAE5"}).
+			Background(lipgloss.AdaptiveColor{Light: "#D1FAE5", Dark: "#065F46"}).
 			Padding(0, 1)
 
 	paneBorderActive = lipgloss.NewStyle().
@@ -100,8 +109,8 @@ var (
 
 	selectedRowStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(lipgloss.Color("#FFFFFF")).
-				Background(lipgloss.AdaptiveColor{Light: "#0284C7", Dark: "#0EA5E9"})
+				Foreground(lipgloss.AdaptiveColor{Light: "#0F172A", Dark: "#FFFFFF"}).
+				Background(lipgloss.AdaptiveColor{Light: "#BAE6FD", Dark: "#0369A1"})
 
 	selectedRowInactiveStyle = lipgloss.NewStyle().
 					Bold(true).
@@ -129,7 +138,7 @@ var (
 			Foreground(lipgloss.AdaptiveColor{Light: "#DC2626", Dark: "#F87171"})
 )
 
-// List item implementations for bubbles/list.
+// List items
 type groupItem struct {
 	name  string
 	kind  string
@@ -147,7 +156,7 @@ type nodeItem struct {
 
 func (n nodeItem) FilterValue() string { return n.name }
 
-// Compact single-line delegate for groups (with bubblezone mouse marks).
+// Delegates (leaf bubblezone markers only — never nested).
 type groupDelegate struct {
 	focused *bool
 }
@@ -182,10 +191,9 @@ func (d groupDelegate) Render(w io.Writer, m list.Model, index int, item list.It
 	} else {
 		line = joinLeftRight(rowTextStyle.Render("  "+name), dimStyle.Render(countStr), width)
 	}
-	fmt.Fprint(w, zone.Mark("group:"+g.name, line))
+	fmt.Fprint(w, zone.Mark(fmt.Sprintf("group:%d", index), line))
 }
 
-// Compact single-line delegate for nodes (with right-aligned latency & bubblezone mouse marks).
 type nodeDelegate struct {
 	focused *bool
 }
@@ -223,7 +231,7 @@ func (d nodeDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 		}
 		line = joinLeftRight(prefix+rowTextStyle.Render(name), formatDelayStyled(n.delay), width)
 	}
-	fmt.Fprint(w, zone.Mark("node:"+n.name, line))
+	fmt.Fprint(w, zone.Mark(fmt.Sprintf("node:%d", index), line))
 }
 
 type model struct {
@@ -235,10 +243,11 @@ type model struct {
 	width  int
 	height int
 
-	version string
-	mode    string
-	up      int64
-	down    int64
+	version    string
+	mode       string
+	sysProxyOn bool
+	up         int64
+	down       int64
 
 	proxies map[string]api.ProxyInfo
 	delays  map[string]int
@@ -250,6 +259,7 @@ type model struct {
 	nodeList      list.Model
 	spin          spinner.Model
 	busy          bool
+	initialized   bool
 
 	statusLine string
 	errLine    string
@@ -264,8 +274,8 @@ func newStyledList(title string, delegate list.ItemDelegate) list.Model {
 	l.Styles.Title = lipgloss.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.AdaptiveColor{Light: "#0F172A", Dark: "#F8FAFC"})
-	l.Styles.TitleBar = lipgloss.NewStyle().Padding(0, 0, 0, 0)
-	l.Styles.StatusBar = dimStyle.Padding(0, 0, 0, 0)
+	l.Styles.TitleBar = lipgloss.NewStyle().Padding(0)
+	l.Styles.StatusBar = dimStyle.Padding(0)
 	l.Styles.PaginationStyle = dimStyle
 	return l
 }
@@ -309,6 +319,26 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(m.loadStateCmd(), m.startTrafficCmd(), m.spin.Tick)
 }
 
+func detectSysProxy() bool {
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+	services, err := sysproxy.ResolveServices("")
+	if err != nil || len(services) == 0 {
+		return false
+	}
+	statuses, err := sysproxy.Status(services)
+	if err != nil {
+		return false
+	}
+	for _, st := range statuses {
+		if strings.HasPrefix(st.HTTP, "on ") || strings.HasPrefix(st.SOCKS, "on ") {
+			return true
+		}
+	}
+	return false
+}
+
 func (m model) loadStateCmd() tea.Cmd {
 	return func() tea.Msg {
 		ver, err := m.client.Version()
@@ -324,9 +354,39 @@ func (m model) loadStateCmd() tea.Cmd {
 			return stateLoadedMsg{err: err}
 		}
 		return stateLoadedMsg{
-			version: ver.Version,
-			mode:    liveCfg.Mode,
-			proxies: proxies,
+			version:    ver.Version,
+			mode:       liveCfg.Mode,
+			proxies:    proxies,
+			sysProxyOn: detectSysProxy(),
+		}
+	}
+}
+
+func (m model) toggleSysProxyCmd() tea.Cmd {
+	wantOn := !m.sysProxyOn
+	port := m.cfg.MixedPort
+	return func() tea.Msg {
+		services, err := sysproxy.ResolveServices("")
+		if err != nil {
+			return actionResultMsg{err: err}
+		}
+		if wantOn {
+			if err := sysproxy.Enable("127.0.0.1", port, services); err != nil {
+				return actionResultMsg{err: err}
+			}
+			on := true
+			return actionResultMsg{
+				status:     fmt.Sprintf("macOS system proxy enabled on [%s]", strings.Join(services, ", ")),
+				sysProxyOn: &on,
+			}
+		}
+		if err := sysproxy.Disable(services); err != nil {
+			return actionResultMsg{err: err}
+		}
+		off := false
+		return actionResultMsg{
+			status:     fmt.Sprintf("macOS system proxy disabled on [%s]", strings.Join(services, ", ")),
+			sysProxyOn: &off,
 		}
 	}
 }
@@ -422,23 +482,29 @@ func (m *model) setFocus(p pane) {
 }
 
 func (m *model) syncSizes() {
-	w, h, leftBoxW, rightBoxW, paneInnerH := m.layout()
-	_ = w
-	_ = h
+	_, _, leftBoxW, rightBoxW, paneInnerH := m.layout()
 	m.groupList.SetSize(leftBoxW-2, paneInnerH)
 	m.nodeList.SetSize(rightBoxW-2, paneInnerH)
 }
 
+// Vertical budget:
+//   Row 0: Header
+//   Row 1: Spacer (empty line for clean visual separation)
+//   Row 2: Action buttons
+//   Row 3..3+paneInnerH+1: Bordered panes (paneInnerH + 2 lines)
+//   Row +2: Status line
+//   Row +3: Help line
+// Total = paneInnerH + 7.
 func (m model) layout() (w, h, leftBoxW, rightBoxW, paneInnerH int) {
 	w = m.width
 	if w < 64 {
 		w = 80
 	}
 	h = m.height
-	if h < 14 {
+	if h < 15 {
 		h = 24
 	}
-	paneInnerH = h - 6
+	paneInnerH = h - 7
 	if paneInnerH < 6 {
 		paneInnerH = 6
 	}
@@ -481,7 +547,11 @@ func (m *model) rebuildNodeList(preserveSelection bool) {
 		return
 	}
 
-	m.nodeList.Title = fmt.Sprintf("%s [%s]", g.Name, g.Type)
+	badge := "Auto"
+	if g.Type == "Selector" {
+		badge = "Selectable"
+	}
+	m.nodeList.Title = fmt.Sprintf("%s  [%s • %s]", g.Name, g.Type, badge)
 	items := make([]list.Item, 0, len(g.All))
 	targetIdx := 0
 	for i, name := range g.All {
@@ -528,6 +598,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.errLine = ""
 		m.version = msg.version
 		m.mode = msg.mode
+		m.sysProxyOn = msg.sysProxyOn
 		m.proxies = msg.proxies
 
 		prevGroup := ""
@@ -535,10 +606,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			prevGroup = sel.name
 		}
 
-		var names []string
+		var selectors, autos []string
 		for name, p := range msg.proxies {
-			if p.Type == "Selector" || p.Type == "URLTest" || p.Type == "Fallback" {
-				names = append(names, name)
+			if p.Type == "Selector" {
+				selectors = append(selectors, name)
+			} else if p.Type == "URLTest" || p.Type == "Fallback" {
+				autos = append(autos, name)
 			}
 			if len(p.History) > 0 {
 				if _, exists := m.delays[name]; !exists {
@@ -546,11 +619,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		sort.Strings(names)
+		sort.Strings(selectors)
+		sort.Strings(autos)
 
-		items := make([]list.Item, 0, len(names))
+		// Put selectable groups first (pushing GLOBAL to the end of selectors).
+		var ordered []string
+		hasGlobal := false
+		for _, s := range selectors {
+			if s == "GLOBAL" {
+				hasGlobal = true
+				continue
+			}
+			ordered = append(ordered, s)
+		}
+		ordered = append(ordered, autos...)
+		if hasGlobal {
+			ordered = append(ordered, "GLOBAL")
+		}
+
+		items := make([]list.Item, 0, len(ordered))
 		groupIdx := 0
-		for i, name := range names {
+		for i, name := range ordered {
 			p := msg.proxies[name]
 			items = append(items, groupItem{
 				name:  name,
@@ -558,17 +647,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				now:   p.Now,
 				count: len(p.All),
 			})
-			if name == prevGroup {
+			if m.initialized && name == prevGroup {
 				groupIdx = i
 			}
 		}
+		m.initialized = true
 		m.groupList.SetItems(items)
 		if groupIdx < len(items) {
 			m.groupList.Select(groupIdx)
 		}
 		m.rebuildNodeList(true)
 		if m.statusLine == "Loading mihomo state..." {
-			m.statusLine = fmt.Sprintf("Ready • %d groups loaded", len(names))
+			m.statusLine = fmt.Sprintf("Ready • %d groups loaded", len(ordered))
 		}
 		return m, nil
 
@@ -588,6 +678,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.errLine = ""
 		m.statusLine = msg.status
+		if msg.sysProxyOn != nil {
+			m.sysProxyOn = *msg.sysProxyOn
+		}
 		if msg.reload {
 			return m, m.loadStateCmd()
 		}
@@ -606,7 +699,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
-		// While typing in bubbles/list's `/` filter input, forward keys directly to the active list.
 		if m.isFiltering() {
 			if msg.String() == "ctrl+c" {
 				m.cancel()
@@ -642,8 +734,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if g.Type != "Selector" {
-				m.statusLine = fmt.Sprintf("Group %s (%s) is managed automatically", g.Name, g.Type)
-				return m, nil
+				m.busy = true
+				m.statusLine = fmt.Sprintf("%s is auto-managed; testing %s...", g.Name, node.name)
+				return m, m.testNodesCmd([]string{node.name}, node.name)
 			}
 			m.busy = true
 			m.statusLine = fmt.Sprintf("Switching %s → %s...", g.Name, node.name)
@@ -664,6 +757,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.testNodesCmd(g.All, g.Name)
 			}
 			return m, nil
+
+		case "s":
+			m.busy = true
+			m.statusLine = "Toggling macOS system proxy..."
+			return m, m.toggleSysProxyCmd()
 
 		case "m":
 			m.busy = true
@@ -697,52 +795,82 @@ func (m model) updateActiveList(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	// Wheel scroll uses pane zones.
+	_, _, leftBoxW, _, _ := m.layout()
+	leftOuterW := leftBoxW + 2
+
+	// Wheel scroll directly based on left/right column boundary (no nested bubblezone!).
 	if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
 		key := tea.KeyMsg{Type: tea.KeyDown}
 		if msg.Button == tea.MouseButtonWheelUp {
 			key = tea.KeyMsg{Type: tea.KeyUp}
 		}
-		if zone.Get("pane:groups").InBounds(msg) {
+		if msg.X < leftOuterW {
 			m.setFocus(paneGroups)
-			return m.updateActiveList(key)
-		}
-		if zone.Get("pane:nodes").InBounds(msg) {
+		} else {
 			m.setFocus(paneNodes)
-			return m.updateActiveList(key)
 		}
-		return m, nil
+		return m.updateActiveList(key)
 	}
 
 	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress {
 		return m, nil
 	}
 
-	// Top action buttons via bubblezone.
+	// Top action toolbar buttons via bubblezone.
 	switch {
 	case zone.Get("btn:mode").InBounds(msg):
 		m.busy = true
 		m.statusLine = "Switching mode..."
 		return m, m.cycleModeCmd()
-	case zone.Get("btn:test").InBounds(msg):
+
+	case zone.Get("btn:sysproxy").InBounds(msg):
+		m.busy = true
+		m.statusLine = "Toggling macOS system proxy..."
+		return m, m.toggleSysProxyCmd()
+
+	case zone.Get("btn:testnode").InBounds(msg):
+		if node, ok := m.nodeList.SelectedItem().(nodeItem); ok {
+			m.busy = true
+			m.statusLine = fmt.Sprintf("Testing %s...", node.name)
+			return m, m.testNodesCmd([]string{node.name}, node.name)
+		}
+		return m, nil
+
+	case zone.Get("btn:testgroup").InBounds(msg):
 		if g, ok := m.selectedGroup(); ok && len(g.All) > 0 {
 			m.busy = true
 			m.statusLine = fmt.Sprintf("Testing %d nodes in %s...", len(g.All), g.Name)
 			return m, m.testNodesCmd(g.All, g.Name)
 		}
 		return m, nil
+
+	case zone.Get("btn:search").InBounds(msg):
+		m.setFocus(paneNodes)
+		return m.updateActiveList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+
+	case zone.Get("btn:prev").InBounds(msg):
+		m.setFocus(paneNodes)
+		m.nodeList.Paginator.PrevPage()
+		return m, nil
+
+	case zone.Get("btn:next").InBounds(msg):
+		m.setFocus(paneNodes)
+		m.nodeList.Paginator.NextPage()
+		return m, nil
+
 	case zone.Get("btn:refresh").InBounds(msg):
 		m.busy = true
 		m.statusLine = "Refreshing..."
 		return m, m.loadStateCmd()
+
 	case zone.Get("btn:quit").InBounds(msg):
 		m.cancel()
 		return m, tea.Quit
 	}
 
-	// Click on a group item.
-	for i, item := range m.groupList.VisibleItems() {
-		if g, ok := item.(groupItem); ok && zone.Get("group:"+g.name).InBounds(msg) {
+	// Click on any rendered group row.
+	for i := range m.groupList.VisibleItems() {
+		if zone.Get(fmt.Sprintf("group:%d", i)).InBounds(msg) {
 			m.setFocus(paneGroups)
 			m.groupList.Select(i)
 			m.rebuildNodeList(false)
@@ -750,15 +878,20 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Click on a node item: focus and immediately switch if Selector.
+	// Click on any rendered node row.
 	for i, item := range m.nodeList.VisibleItems() {
-		if n, ok := item.(nodeItem); ok && zone.Get("node:"+n.name).InBounds(msg) {
+		if zone.Get(fmt.Sprintf("node:%d", i)).InBounds(msg) {
 			m.setFocus(paneNodes)
 			m.nodeList.Select(i)
+			n, ok := item.(nodeItem)
+			if !ok {
+				return m, nil
+			}
 			if g, ok := m.selectedGroup(); ok {
 				if g.Type != "Selector" {
-					m.statusLine = fmt.Sprintf("Group %s (%s) is managed automatically", g.Name, g.Type)
-					return m, nil
+					m.busy = true
+					m.statusLine = fmt.Sprintf("%s is auto-managed; testing %s...", g.Name, n.name)
+					return m, m.testNodesCmd([]string{n.name}, n.name)
 				}
 				m.busy = true
 				m.statusLine = fmt.Sprintf("Switching %s → %s...", g.Name, n.name)
@@ -768,11 +901,13 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Focus pane if clicked on empty area inside pane.
-	if zone.Get("pane:groups").InBounds(msg) {
-		m.setFocus(paneGroups)
-	} else if zone.Get("pane:nodes").InBounds(msg) {
-		m.setFocus(paneNodes)
+	// Clicking anywhere else inside left/right pane focuses that pane.
+	if msg.Y >= 3 {
+		if msg.X < leftOuterW {
+			m.setFocus(paneGroups)
+		} else {
+			m.setFocus(paneNodes)
+		}
 	}
 	return m, nil
 }
@@ -793,19 +928,43 @@ func (m model) View() string {
 	rightHeader := fmt.Sprintf("%s  %s", speedUpStyle.Render("↑ "+formatSpeed(m.up)), speedDownStyle.Render("↓ "+formatSpeed(m.down)))
 	header := joinLeftRight(leftHeader, rightHeader, w)
 
-	// Row 1: Action buttons (marked with bubblezone)
+	// Row 2: Clickable action toolbar (all leaf bubblezones)
 	mode := m.mode
 	if mode == "" {
 		mode = m.cfg.Mode
 	}
-	actionBar := strings.Join([]string{
+	sysLabel := "SysProxy: OFF"
+	sysStyle := btnStyle
+	if m.sysProxyOn {
+		sysLabel = "SysProxy: ON"
+		sysStyle = btnOnStyle
+	}
+	buttons := []string{
 		zone.Mark("btn:mode", btnAccentStyle.Render("Mode: "+strings.ToUpper(mode))),
-		zone.Mark("btn:test", btnStyle.Render("Test Group")),
+	}
+	if runtime.GOOS == "darwin" {
+		buttons = append(buttons, zone.Mark("btn:sysproxy", sysStyle.Render(sysLabel)))
+	}
+	buttons = append(buttons,
+		zone.Mark("btn:testnode", btnStyle.Render("Test Node")),
+		zone.Mark("btn:testgroup", btnStyle.Render("Test Group")),
+		zone.Mark("btn:search", btnStyle.Render("Search /")),
+	)
+	if m.nodeList.Paginator.TotalPages > 1 {
+		pageLabel := fmt.Sprintf("%d/%d", m.nodeList.Paginator.Page+1, m.nodeList.Paginator.TotalPages)
+		buttons = append(buttons,
+			zone.Mark("btn:prev", btnStyle.Render("◀")),
+			dimStyle.Render(pageLabel),
+			zone.Mark("btn:next", btnStyle.Render("▶")),
+		)
+	}
+	buttons = append(buttons,
 		zone.Mark("btn:refresh", btnStyle.Render("Refresh")),
 		zone.Mark("btn:quit", btnStyle.Render("Quit")),
-	}, " ")
+	)
+	actionBar := strings.Join(buttons, " ")
 
-	// Row 2..: Two-pane bubbles/list body
+	// Row 3..: Two-pane body (NO outer zone.Mark wrapper so inner row zones work 100%)
 	leftStyle := paneBorderInactive.Width(leftBoxW).Height(paneInnerH).MaxHeight(paneInnerH + 2)
 	rightStyle := paneBorderInactive.Width(rightBoxW).Height(paneInnerH).MaxHeight(paneInnerH + 2)
 	if m.focus == paneGroups {
@@ -814,9 +973,7 @@ func (m model) View() string {
 		rightStyle = paneBorderActive.Width(rightBoxW).Height(paneInnerH).MaxHeight(paneInnerH + 2)
 	}
 
-	leftPane := zone.Mark("pane:groups", leftStyle.Render(m.groupList.View()))
-	rightPane := zone.Mark("pane:nodes", rightStyle.Render(m.nodeList.View()))
-	body := lipgloss.JoinHorizontal(lipgloss.Top, leftPane, " ", rightPane)
+	body := lipgloss.JoinHorizontal(lipgloss.Top, leftStyle.Render(m.groupList.View()), " ", rightStyle.Render(m.nodeList.View()))
 
 	// Footer
 	statusText := m.statusLine
@@ -827,9 +984,9 @@ func (m model) View() string {
 	if m.errLine != "" {
 		status = errStyle.Render(ansi.Truncate(m.errLine, w, "…"))
 	}
-	help := dimStyle.Render(ansi.Truncate("Click/Scroll: select  •  /: search  •  Tab: pane  •  Enter: switch  •  t/T: test  •  m: mode  •  r: refresh  •  q: quit", w, "…"))
+	help := dimStyle.Render(ansi.Truncate("Click/Scroll: select  •  /: search  •  s: sysproxy  •  m: mode  •  t/T: test  •  r: refresh  •  q: quit", w, "…"))
 
-	return zone.Scan(lipgloss.JoinVertical(lipgloss.Left, header, actionBar, body, status, help))
+	return zone.Scan(lipgloss.JoinVertical(lipgloss.Left, header, "", actionBar, body, status, help))
 }
 
 func joinLeftRight(left, right string, totalW int) string {
