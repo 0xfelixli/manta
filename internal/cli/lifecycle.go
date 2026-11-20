@@ -3,10 +3,12 @@ package cli
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"manta/internal/api"
 	"manta/internal/config"
 	"manta/internal/sysproxy"
 )
@@ -15,12 +17,14 @@ var (
 	upWithSysProxy   bool
 	upWithTun        bool
 	downWithSysProxy bool
+	statusWithIP     bool
 )
 
 func init() {
 	upCmd.Flags().BoolVar(&upWithSysProxy, "sys", false, "Also enable macOS system proxy")
 	upCmd.Flags().BoolVar(&upWithTun, "tun", false, "Enable TUN virtual interface to capture all system & terminal traffic (requires sudo)")
 	downCmd.Flags().BoolVar(&downWithSysProxy, "sys", false, "Also disable macOS system proxy")
+	statusCmd.Flags().BoolVar(&statusWithIP, "ip", false, "Also query current exit IP and geolocation via the proxy")
 	rootCmd.AddCommand(initCmd, upCmd, downCmd, statusCmd, logsCmd)
 }
 
@@ -139,6 +143,26 @@ var statusCmd = &cobra.Command{
 		}
 		if live, err := client.GetConfigs(); err == nil {
 			fmt.Printf("Mode:    %s\n", live.Mode)
+			if live.Tun.Enable {
+				fmt.Printf("TUN:     enabled (%s)\n", emptyOr(live.Tun.Stack, "mixed"))
+			} else {
+				fmt.Println("TUN:     disabled")
+			}
+		}
+		if runtime.GOOS == "darwin" {
+			if services, err := sysproxy.ResolveServices(""); err == nil {
+				if sts, err := sysproxy.Status(services); err == nil && len(sts) > 0 {
+					fmt.Printf("SysProxy: %s [%s]\n", sts[0].HTTP, sts[0].Service)
+				}
+			}
+		}
+		if statusWithIP {
+			if info, err := api.FetchExitIP(cfg.MixedPort); err == nil {
+				loc := strings.TrimSpace(strings.Join([]string{info.Country, info.City}, " "))
+				fmt.Printf("Exit IP: %s (%s • %s)\n", info.IP, loc, info.ISP)
+			} else {
+				fmt.Printf("Exit IP: lookup failed (%v)\n", err)
+			}
 		}
 		return nil
 	},

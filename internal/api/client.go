@@ -32,6 +32,27 @@ type ConfigsResp struct {
 	AllowLan  bool   `json:"allow-lan"`
 	Mode      string `json:"mode"`
 	LogLevel  string `json:"log-level"`
+	Tun       struct {
+		Enable bool   `json:"enable"`
+		Stack  string `json:"stack"`
+	} `json:"tun"`
+}
+
+// ConnectionsSummary summarizes GET /connections.
+type ConnectionsSummary struct {
+	UploadTotal   int64             `json:"uploadTotal"`
+	DownloadTotal int64             `json:"downloadTotal"`
+	Connections   []json.RawMessage `json:"connections"`
+}
+
+// ExitIPInfo describes the current outbound IP and geo location through the proxy.
+type ExitIPInfo struct {
+	IP          string
+	Country     string
+	CountryCode string
+	Region      string
+	City        string
+	ISP         string
 }
 
 // ProxyInfo describes a single proxy or proxy group from GET /proxies.
@@ -129,6 +150,86 @@ func (c *Client) GetConfigs() (*ConfigsResp, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// GetConnections fetches total traffic counters and active connection count.
+func (c *Client) GetConnections() (*ConnectionsSummary, error) {
+	var res ConnectionsSummary
+	if err := c.doJSON(http.MethodGet, "/connections", nil, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// FetchExitIP queries the current exit IP & geolocation via manta's local HTTP proxy.
+func FetchExitIP(mixedPort int) (*ExitIPInfo, error) {
+	proxyURL, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", mixedPort))
+	if err != nil {
+		return nil, err
+	}
+	httpClient := &http.Client{
+		Timeout: 6 * time.Second,
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
+
+	// Primary: ip-api.com (fast, concise JSON)
+	req, err := http.NewRequest(http.MethodGet, "http://ip-api.com/json/?fields=status,country,countryCode,regionName,city,isp,query", nil)
+	if err == nil {
+		resp, err := httpClient.Do(req)
+		if err == nil {
+			defer resp.Body.Close()
+			var r struct {
+				Status      string `json:"status"`
+				Country     string `json:"country"`
+				CountryCode string `json:"countryCode"`
+				RegionName  string `json:"regionName"`
+				City        string `json:"city"`
+				ISP         string `json:"isp"`
+				Query       string `json:"query"`
+			}
+			if json.NewDecoder(resp.Body).Decode(&r) == nil && r.Status == "success" && r.Query != "" {
+				return &ExitIPInfo{
+					IP:          r.Query,
+					Country:     r.Country,
+					CountryCode: r.CountryCode,
+					Region:      r.RegionName,
+					City:        r.City,
+					ISP:         r.ISP,
+				}, nil
+			}
+		}
+	}
+
+	// Fallback: ipwho.is
+	resp, err := httpClient.Get("https://ipwho.is/")
+	if err != nil {
+		return nil, fmt.Errorf("exit IP lookup failed: %w", err)
+	}
+	defer resp.Body.Close()
+	var fb struct {
+		Success     bool   `json:"success"`
+		IP          string `json:"ip"`
+		Country     string `json:"country"`
+		CountryCode string `json:"country_code"`
+		Region      string `json:"region"`
+		City        string `json:"city"`
+		Connection  struct {
+			ISP string `json:"isp"`
+		} `json:"connection"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&fb); err != nil || !fb.Success || fb.IP == "" {
+		return nil, fmt.Errorf("failed to parse exit IP response")
+	}
+	return &ExitIPInfo{
+		IP:          fb.IP,
+		Country:     fb.Country,
+		CountryCode: fb.CountryCode,
+		Region:      fb.Region,
+		City:        fb.City,
+		ISP:         fb.Connection.ISP,
+	}, nil
 }
 
 // SetMode switches between rule, global, and direct modes without restarting.
