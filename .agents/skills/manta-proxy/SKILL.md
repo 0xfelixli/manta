@@ -32,10 +32,10 @@ Run the bundled verification script before making network requests through the p
 bash scripts/check_proxy.sh
 ```
 
-Or manually:
+Or manually (use `--ip` to also verify exit IP, country/city, and ISP):
 
 ```bash
-manta status
+manta status --ip
 curl -x http://127.0.0.1:7890 -sS --max-time 8 -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" https://www.gstatic.com/generate_204
 ```
 

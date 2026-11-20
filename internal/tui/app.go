@@ -303,8 +303,11 @@ func (d groupDelegate) Render(w io.Writer, m list.Model, index int, item list.It
 	if width < 10 {
 		width = 20
 	}
-	countStr := fmt.Sprintf("%d", g.count)
-	nameMax := width - len(countStr) - 3
+	rightTag := fmt.Sprintf("%d", g.count)
+	if g.kind != "Selector" {
+		rightTag = fmt.Sprintf("auto %d", g.count)
+	}
+	nameMax := width - len(rightTag) - 3
 	if nameMax < 6 {
 		nameMax = 6
 	}
@@ -312,14 +315,14 @@ func (d groupDelegate) Render(w io.Writer, m list.Model, index int, item list.It
 
 	var line string
 	if index == m.Index() {
-		plain := joinLeftRight("▸ "+name, countStr, width)
+		plain := joinLeftRight("▸ "+name, rightTag, width)
 		if d.focused != nil && *d.focused {
 			line = selectedRowStyle.Render(plain)
 		} else {
 			line = selectedRowInactiveStyle.Render(plain)
 		}
 	} else {
-		line = joinLeftRight(rowTextStyle.Render("  "+name), dimStyle.Render(countStr), width)
+		line = joinLeftRight(rowTextStyle.Render("  "+name), dimStyle.Render(rightTag), width)
 	}
 	fmt.Fprint(w, zone.Mark(fmt.Sprintf("group:%d", index), line))
 }
