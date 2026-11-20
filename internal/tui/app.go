@@ -103,173 +103,183 @@ type toastExpireMsg struct {
 	seq int
 }
 
-// Adaptive styles for both light (white) and dark terminals.
+// Oceanic Mineral design system — adaptive for both light (white) and dark terminals.
+// 80% calm mineral neutrals (Zinc), 15% oceanic teal/blue focus, 5% restrained semantic accents.
 var (
+	// Brand identity: oceanic teal on soft seafoam
 	badgeStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.AdaptiveColor{Light: "#0369A1", Dark: "#E0F2FE"}).
-			Background(lipgloss.AdaptiveColor{Light: "#DBEAFE", Dark: "#0369A1"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#0F766E", Dark: "#5EEAD4"}).
+			Background(lipgloss.AdaptiveColor{Light: "#CCFBF1", Dark: "#134E4A"}).
 			Padding(0, 1)
 
+	// Connection status pills
 	pillOnlineStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.AdaptiveColor{Light: "#065F46", Dark: "#D1FAE5"}).
-			Background(lipgloss.AdaptiveColor{Light: "#D1FAE5", Dark: "#065F46"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#0D9488", Dark: "#2DD4BF"}).
+			Background(lipgloss.AdaptiveColor{Light: "#F0FDFA", Dark: "#115E59"}).
 			Padding(0, 1)
 
 	pillOfflineStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(lipgloss.AdaptiveColor{Light: "#991B1B", Dark: "#FEE2E2"}).
-				Background(lipgloss.AdaptiveColor{Light: "#FEE2E2", Dark: "#991B1B"}).
+				Foreground(lipgloss.AdaptiveColor{Light: "#BE123C", Dark: "#FDA4AF"}).
+				Background(lipgloss.AdaptiveColor{Light: "#FFF1F2", Dark: "#881337"}).
 				Padding(0, 1)
 
+	// Navigation tabs: crisp oceanic blue on airy mist
 	tabActiveStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.AdaptiveColor{Light: "#0369A1", Dark: "#E0F2FE"}).
-			Background(lipgloss.AdaptiveColor{Light: "#E0F2FE", Dark: "#0369A1"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#1D4ED8", Dark: "#93C5FD"}).
+			Background(lipgloss.AdaptiveColor{Light: "#EFF6FF", Dark: "#1E3A8A"}).
 			Padding(0, 1)
 
 	tabInactiveStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.AdaptiveColor{Light: "#475569", Dark: "#94A3B8"}).
+				Foreground(lipgloss.AdaptiveColor{Light: "#71717A", Dark: "#A1A1AA"}).
 				Padding(0, 1)
 
 	headerRuleStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#E2E8F0", Dark: "#334155"})
+			Foreground(lipgloss.AdaptiveColor{Light: "#E4E4E7", Dark: "#27272A"})
 
 	exitLabelStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.AdaptiveColor{Light: "#0369A1", Dark: "#38BDF8"})
+			Foreground(lipgloss.AdaptiveColor{Light: "#2563EB", Dark: "#60A5FA"})
 
+	// Whisper-quiet card borders so content leads the hierarchy
 	cardStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.AdaptiveColor{Light: "#CBD5E1", Dark: "#475569"}).
+			BorderForeground(lipgloss.AdaptiveColor{Light: "#E4E4E7", Dark: "#27272A"}).
 			Padding(0, 1)
 
 	cardTitleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.AdaptiveColor{Light: "#0F172A", Dark: "#F8FAFC"})
+			Foreground(lipgloss.AdaptiveColor{Light: "#18181B", Dark: "#F4F4F5"})
 
 	kvKeyStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#64748B", Dark: "#94A3B8"})
+			Foreground(lipgloss.AdaptiveColor{Light: "#71717A", Dark: "#A1A1AA"})
 
 	kvValStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.AdaptiveColor{Light: "#0F172A", Dark: "#F8FAFC"})
+			Foreground(lipgloss.AdaptiveColor{Light: "#18181B", Dark: "#F4F4F5"})
 
+	// Paired traffic accents: teal upload + ocean-blue download
 	speedUpStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#059669", Dark: "#34D399"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#0D9488", Dark: "#2DD4BF"}).
 			Bold(true)
 
 	speedDownStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#0284C7", Dark: "#38BDF8"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#2563EB", Dark: "#60A5FA"}).
 			Bold(true)
 
-	// Inline interactive switches & segmented controls
+	// Inline switches: airy & restrained so stacked rows never feel heavy
 	switchOnStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.AdaptiveColor{Light: "#065F46", Dark: "#D1FAE5"}).
-			Background(lipgloss.AdaptiveColor{Light: "#D1FAE5", Dark: "#065F46"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#0F766E", Dark: "#5EEAD4"}).
+			Background(lipgloss.AdaptiveColor{Light: "#F0FDFA", Dark: "#134E4A"}).
 			Padding(0, 1)
 
 	switchOffStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#475569", Dark: "#CBD5E1"}).
-			Background(lipgloss.AdaptiveColor{Light: "#E2E8F0", Dark: "#334155"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#71717A", Dark: "#A1A1AA"}).
+			Background(lipgloss.AdaptiveColor{Light: "#F4F4F5", Dark: "#27272A"}).
 			Padding(0, 1)
 
+	// Segmented mode control
 	segActiveStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.AdaptiveColor{Light: "#0369A1", Dark: "#E0F2FE"}).
-			Background(lipgloss.AdaptiveColor{Light: "#DBEAFE", Dark: "#0369A1"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#1D4ED8", Dark: "#93C5FD"}).
+			Background(lipgloss.AdaptiveColor{Light: "#DBEAFE", Dark: "#1E3A8A"}).
 			Padding(0, 1)
 
 	segInactiveStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.AdaptiveColor{Light: "#475569", Dark: "#94A3B8"}).
-				Background(lipgloss.AdaptiveColor{Light: "#F1F5F9", Dark: "#1E293B"}).
+				Foreground(lipgloss.AdaptiveColor{Light: "#71717A", Dark: "#A1A1AA"}).
+				Background(lipgloss.AdaptiveColor{Light: "#F4F4F5", Dark: "#27272A"}).
 				Padding(0, 1)
 
+	// Subtle secondary actions (ghost-pill)
 	miniBtnStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#0369A1", Dark: "#7DD3FC"}).
-			Background(lipgloss.AdaptiveColor{Light: "#E0F2FE", Dark: "#0C4A6E"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#2563EB", Dark: "#60A5FA"}).
+			Background(lipgloss.AdaptiveColor{Light: "#F4F4F5", Dark: "#27272A"}).
 			Padding(0, 1)
 
 	btnStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#1E293B", Dark: "#E2E8F0"}).
-			Background(lipgloss.AdaptiveColor{Light: "#E2E8F0", Dark: "#334155"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#3F3F46", Dark: "#E4E4E7"}).
+			Background(lipgloss.AdaptiveColor{Light: "#F4F4F5", Dark: "#27272A"}).
 			Padding(0, 1)
 
 	btnAccentStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.AdaptiveColor{Light: "#0369A1", Dark: "#E0F2FE"}).
-			Background(lipgloss.AdaptiveColor{Light: "#E0F2FE", Dark: "#0369A1"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#1D4ED8", Dark: "#93C5FD"}).
+			Background(lipgloss.AdaptiveColor{Light: "#EFF6FF", Dark: "#1E3A8A"}).
 			Padding(0, 1)
 
+	// Proxies split panes
 	paneBorderActive = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.AdaptiveColor{Light: "#0284C7", Dark: "#38BDF8"}).
+				BorderForeground(lipgloss.AdaptiveColor{Light: "#3B82F6", Dark: "#60A5FA"}).
 				Padding(0, 1)
 
 	paneBorderInactive = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.AdaptiveColor{Light: "#CBD5E1", Dark: "#475569"}).
+				BorderForeground(lipgloss.AdaptiveColor{Light: "#E4E4E7", Dark: "#27272A"}).
 				Padding(0, 1)
 
 	rowTextStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#1E293B", Dark: "#E2E8F0"})
+			Foreground(lipgloss.AdaptiveColor{Light: "#27272A", Dark: "#E4E4E7"})
 
 	selectedRowStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(lipgloss.AdaptiveColor{Light: "#0F172A", Dark: "#FFFFFF"}).
-				Background(lipgloss.AdaptiveColor{Light: "#BAE6FD", Dark: "#0369A1"})
+				Foreground(lipgloss.AdaptiveColor{Light: "#1E3A8A", Dark: "#EFF6FF"}).
+				Background(lipgloss.AdaptiveColor{Light: "#DBEAFE", Dark: "#1E3A8A"})
 
 	selectedRowInactiveStyle = lipgloss.NewStyle().
 					Bold(true).
-					Foreground(lipgloss.AdaptiveColor{Light: "#0F172A", Dark: "#F8FAFC"}).
-					Background(lipgloss.AdaptiveColor{Light: "#E2E8F0", Dark: "#334155"})
+					Foreground(lipgloss.AdaptiveColor{Light: "#18181B", Dark: "#F4F4F5"}).
+					Background(lipgloss.AdaptiveColor{Light: "#F4F4F5", Dark: "#27272A"})
 
 	activeMarkStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.AdaptiveColor{Light: "#059669", Dark: "#34D399"})
+			Foreground(lipgloss.AdaptiveColor{Light: "#0D9488", Dark: "#2DD4BF"})
 
 	dimStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#64748B", Dark: "#94A3B8"})
+			Foreground(lipgloss.AdaptiveColor{Light: "#71717A", Dark: "#71717A"})
 
+	// Transient feedback toasts
 	toastInfoStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#334155", Dark: "#CBD5E1"}).
-			Background(lipgloss.AdaptiveColor{Light: "#F1F5F9", Dark: "#1E293B"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#3F3F46", Dark: "#D4D4D8"}).
+			Background(lipgloss.AdaptiveColor{Light: "#F4F4F5", Dark: "#27272A"}).
 			Padding(0, 1)
 
 	toastBusyStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.AdaptiveColor{Light: "#0369A1", Dark: "#E0F2FE"}).
-			Background(lipgloss.AdaptiveColor{Light: "#E0F2FE", Dark: "#0C4A6E"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#1D4ED8", Dark: "#93C5FD"}).
+			Background(lipgloss.AdaptiveColor{Light: "#EFF6FF", Dark: "#1E3A8A"}).
 			Padding(0, 1)
 
 	toastSuccessStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(lipgloss.AdaptiveColor{Light: "#065F46", Dark: "#D1FAE5"}).
-				Background(lipgloss.AdaptiveColor{Light: "#D1FAE5", Dark: "#064E3B"}).
+				Foreground(lipgloss.AdaptiveColor{Light: "#0F766E", Dark: "#5EEAD4"}).
+				Background(lipgloss.AdaptiveColor{Light: "#F0FDFA", Dark: "#134E4A"}).
 				Padding(0, 1)
 
 	toastWarnStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.AdaptiveColor{Light: "#92400E", Dark: "#FEF3C7"}).
-			Background(lipgloss.AdaptiveColor{Light: "#FEF3C7", Dark: "#78350F"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#B45309", Dark: "#FCD34D"}).
+			Background(lipgloss.AdaptiveColor{Light: "#FFFBEB", Dark: "#78350F"}).
 			Padding(0, 1)
 
 	toastErrorStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.AdaptiveColor{Light: "#991B1B", Dark: "#FEE2E2"}).
-			Background(lipgloss.AdaptiveColor{Light: "#FEE2E2", Dark: "#7F1D1D"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#BE123C", Dark: "#FDA4AF"}).
+			Background(lipgloss.AdaptiveColor{Light: "#FFF1F2", Dark: "#881337"}).
 			Padding(0, 1)
 
+	// Refined latency semantics (sage-teal / warm amber / rose-coral)
 	delayGoodStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#059669", Dark: "#34D399"})
+			Foreground(lipgloss.AdaptiveColor{Light: "#0D9488", Dark: "#2DD4BF"})
 
 	delayMedStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#D97706", Dark: "#FBBF24"})
+			Foreground(lipgloss.AdaptiveColor{Light: "#B45309", Dark: "#FBBF24"})
 
 	delayBadStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#DC2626", Dark: "#F87171"})
+			Foreground(lipgloss.AdaptiveColor{Light: "#E11D48", Dark: "#FB7185"})
 )
 
 // List items
