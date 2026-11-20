@@ -1,0 +1,13 @@
+# Compiled binaries
+/manta
+*.exe
+*.out
+
+# OS & editor files
+.DS_Store
+.vscode/
+.idea/
+
+# Local runtime/test artifacts
+*.log
+*.pid
