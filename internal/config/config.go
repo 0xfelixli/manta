@@ -31,15 +31,20 @@ type ProfileMeta struct {
 
 // AppConfig represents ~/.config/manta/config.yaml.
 type AppConfig struct {
-	MixedPort     int                    `yaml:"mixed_port"`
-	AllowLan      bool                   `yaml:"allow_lan"`
-	Mode          string                 `yaml:"mode"`
-	TunEnabled    bool                   `yaml:"tun_enabled,omitempty"`
-	Controller    string                 `yaml:"controller"`
-	Secret        string                 `yaml:"secret,omitempty"`
-	CoreBin       string                 `yaml:"core_bin,omitempty"`
-	ActiveProfile string                 `yaml:"active_profile,omitempty"`
-	Profiles      map[string]ProfileMeta `yaml:"profiles,omitempty"`
+	MixedPort      int                    `yaml:"mixed_port"`
+	AllowLan       bool                   `yaml:"allow_lan"`
+	Mode           string                 `yaml:"mode"`
+	TunEnabled     bool                   `yaml:"tun_enabled,omitempty"`
+	SortBySpeed    bool                   `yaml:"sort_by_speed,omitempty"`
+	AutoTestOnOpen bool                   `yaml:"auto_test_on_open,omitempty"`
+	StartupTab     string                 `yaml:"startup_tab,omitempty"` // "dashboard", "proxies", or "last"
+	LastTab        string                 `yaml:"last_tab,omitempty"`
+	LastGroup      string                 `yaml:"last_group,omitempty"`
+	Controller     string                 `yaml:"controller"`
+	Secret         string                 `yaml:"secret,omitempty"`
+	CoreBin        string                 `yaml:"core_bin,omitempty"`
+	ActiveProfile  string                 `yaml:"active_profile,omitempty"`
+	Profiles       map[string]ProfileMeta `yaml:"profiles,omitempty"`
 }
 
 // DefaultPaths returns the default ~/.config/manta directory layout.

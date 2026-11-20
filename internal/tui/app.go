@@ -28,6 +28,7 @@ type tabView int
 const (
 	tabDashboard tabView = iota
 	tabProxies
+	tabSettings
 )
 
 type pane int
@@ -457,13 +458,26 @@ func Run(cfg *config.AppConfig, mgr *core.Manager, client *api.Client) error {
 	sp.Spinner = spinner.Dot
 	sp.Style = speedDownStyle
 
+	initialTab := tabDashboard
+	switch strings.ToLower(cfg.StartupTab) {
+	case "proxies":
+		initialTab = tabProxies
+	case "last":
+		if strings.EqualFold(cfg.LastTab, "proxies") {
+			initialTab = tabProxies
+		}
+	default:
+		// default "dashboard"
+	}
+
 	m := model{
 		cfg:           cfg,
 		mgr:           mgr,
 		client:        client,
 		ctx:           ctx,
 		cancel:        cancel,
-		activeTab:     tabDashboard,
+		activeTab:     initialTab,
+		sortByFast:    cfg.SortBySpeed,
 		proxies:       make(map[string]api.ProxyInfo),
 		delays:        make(map[string]int),
 		downHist:      make([]int64, 0, 32),
@@ -482,6 +496,27 @@ func Run(cfg *config.AppConfig, mgr *core.Manager, client *api.Client) error {
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err
+}
+
+func (m *model) savePrefs() {
+	if m.mgr == nil || m.cfg == nil {
+		return
+	}
+	m.cfg.SortBySpeed = m.sortByFast
+	if m.activeTab == tabProxies {
+		m.cfg.LastTab = "proxies"
+	} else if m.activeTab == tabDashboard {
+		m.cfg.LastTab = "dashboard"
+	}
+	if sel, ok := m.groupList.SelectedItem().(groupItem); ok && sel.name != "" {
+		m.cfg.LastGroup = sel.name
+	}
+	if m.mode != "" {
+		m.cfg.Mode = strings.ToLower(m.mode)
+	}
+	m.cfg.AllowLan = m.allowLan
+	m.cfg.TunEnabled = m.tunOn
+	_ = config.Save(m.mgr.Paths, m.cfg)
 }
 
 // setToast shows a transient colored feedback banner on the single footer line.
@@ -1035,6 +1070,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.totalUp = msg.totalUp
 		m.totalDown = msg.totalDown
 		m.proxies = msg.proxies
+		if m.initialized {
+			m.savePrefs()
+		}
 
 		prevGroup := ""
 		if sel, ok := m.groupList.SelectedItem().(groupItem); ok {
@@ -1073,6 +1111,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		items := make([]list.Item, 0, len(ordered))
 		groupIdx := 0
+		wantGroup := prevGroup
+		if !m.initialized && m.cfg.LastGroup != "" {
+			wantGroup = m.cfg.LastGroup
+		}
 		for i, name := range ordered {
 			p := msg.proxies[name]
 			items = append(items, groupItem{
@@ -1081,7 +1123,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				now:   p.Now,
 				count: len(p.All),
 			})
-			if m.initialized && name == prevGroup {
+			if wantGroup != "" && name == wantGroup {
 				groupIdx = i
 			}
 		}
@@ -1095,6 +1137,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if firstLoad {
 			m.toastType = toastNone
 			m.toastText = ""
+			if m.cfg.AutoTestOnOpen {
+				if g, ok := m.selectedGroup(); ok && len(g.All) > 0 {
+					m.busy = true
+					m.setToast(toastBusy, fmt.Sprintf("Auto-testing %d nodes in %s...", len(g.All), g.Name))
+					return m, m.testNodesCmd(g.All, g.Name, false, m.sortByFast)
+				}
+			}
 		}
 		return m, nil
 
@@ -1171,6 +1220,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.autoSort {
 			m.sortByFast = true
+			m.savePrefs()
 		}
 		m.rebuildNodeList(!msg.autoSort)
 		if msg.single {
@@ -1204,10 +1254,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "1":
 			m.activeTab = tabDashboard
+			m.savePrefs()
 			return m, nil
 
 		case "2":
 			m.activeTab = tabProxies
+			m.savePrefs()
+			return m, nil
+
+		case "3":
+			m.activeTab = tabSettings
 			return m, nil
 
 		case "p":
@@ -1286,11 +1342,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			case "o":
 				m.sortByFast = !m.sortByFast
+				m.savePrefs()
 				m.rebuildNodeList(true)
 				if m.sortByFast {
-					return m, m.setToast(toastInfo, "↕ Sorted by speed (fastest first)")
+					return m, m.setToast(toastInfo, "↕ Sorted by speed (saved as default)")
 				}
-				return m, m.setToast(toastInfo, "↕ Restored default order")
+				return m, m.setToast(toastInfo, "↕ Restored default order (saved)")
 			}
 			return m.updateActiveList(msg)
 		}
@@ -1361,9 +1418,85 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case zone.Get("tab:dashboard").InBounds(msg):
 		m.activeTab = tabDashboard
+		m.savePrefs()
 		return m, nil
 	case zone.Get("tab:proxies").InBounds(msg):
 		m.activeTab = tabProxies
+		m.savePrefs()
+		return m, nil
+	case zone.Get("tab:settings").InBounds(msg):
+		m.activeTab = tabSettings
+		return m, nil
+	}
+
+	// Settings tab controls
+	if m.activeTab == tabSettings {
+		switch {
+		case zone.Get("set:sort:speed").InBounds(msg):
+			m.sortByFast = true
+			m.savePrefs()
+			m.rebuildNodeList(true)
+			return m, m.setToast(toastSuccess, "✓ Default node sort saved: Speed ↑")
+
+		case zone.Get("set:sort:default").InBounds(msg):
+			m.sortByFast = false
+			m.savePrefs()
+			m.rebuildNodeList(true)
+			return m, m.setToast(toastSuccess, "✓ Default node sort saved: Original")
+
+		case zone.Get("set:start:dashboard").InBounds(msg):
+			m.cfg.StartupTab = "dashboard"
+			m.savePrefs()
+			return m, m.setToast(toastSuccess, "✓ Startup tab saved: Dashboard")
+
+		case zone.Get("set:start:proxies").InBounds(msg):
+			m.cfg.StartupTab = "proxies"
+			m.savePrefs()
+			return m, m.setToast(toastSuccess, "✓ Startup tab saved: Proxies")
+
+		case zone.Get("set:start:last").InBounds(msg):
+			m.cfg.StartupTab = "last"
+			m.savePrefs()
+			return m, m.setToast(toastSuccess, "✓ Startup tab saved: Last Used")
+
+		case zone.Get("set:autotest").InBounds(msg):
+			m.cfg.AutoTestOnOpen = !m.cfg.AutoTestOnOpen
+			m.savePrefs()
+			if m.cfg.AutoTestOnOpen {
+				return m, m.setToast(toastSuccess, "✓ Auto-test on open: ON")
+			}
+			return m, m.setToast(toastInfo, "✓ Auto-test on open: OFF")
+
+		case zone.Get("set:mode:rule").InBounds(msg):
+			m.busy = true
+			m.setToast(toastBusy, "Switching mode → RULE...")
+			return m, m.setModeCmd("rule")
+
+		case zone.Get("set:mode:global").InBounds(msg):
+			m.busy = true
+			m.setToast(toastBusy, "Switching mode → GLOBAL...")
+			return m, m.setModeCmd("global")
+
+		case zone.Get("set:mode:direct").InBounds(msg):
+			m.busy = true
+			m.setToast(toastBusy, "Switching mode → DIRECT...")
+			return m, m.setModeCmd("direct")
+
+		case zone.Get("set:tun").InBounds(msg):
+			m.busy = true
+			m.setToast(toastBusy, "Toggling TUN mode...")
+			return m, m.toggleTunCmd()
+
+		case zone.Get("set:sysproxy").InBounds(msg):
+			m.busy = true
+			m.setToast(toastBusy, "Toggling macOS system proxy...")
+			return m, m.toggleSysProxyCmd()
+
+		case zone.Get("set:lan").InBounds(msg):
+			m.busy = true
+			m.setToast(toastBusy, "Toggling Allow LAN...")
+			return m, m.toggleAllowLanCmd()
+		}
 		return m, nil
 	}
 
@@ -1439,11 +1572,12 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case zone.Get("btn:sort").InBounds(msg):
 		m.sortByFast = !m.sortByFast
+		m.savePrefs()
 		m.rebuildNodeList(true)
 		if m.sortByFast {
-			return m, m.setToast(toastInfo, "↕ Sorted by speed (fastest first)")
+			return m, m.setToast(toastInfo, "↕ Sorted by speed (saved as default)")
 		}
-		return m, m.setToast(toastInfo, "↕ Restored default order")
+		return m, m.setToast(toastInfo, "↕ Restored default order (saved)")
 
 	case zone.Get("btn:testnode").InBounds(msg):
 		if node, ok := m.nodeList.SelectedItem().(nodeItem); ok {
@@ -1482,6 +1616,7 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if zone.Get(fmt.Sprintf("group:%d", i)).InBounds(msg) {
 			m.setFocus(paneGroups)
 			m.groupList.Select(i)
+			m.savePrefs()
 			m.rebuildNodeList(false)
 			return m, nil
 		}
@@ -1511,16 +1646,21 @@ func (m model) View() string {
 	// Row 0: Single-line clean navigation bar (zero duplication)
 	dashTab := tabInactiveStyle.Render("1 Dashboard")
 	proxTab := tabInactiveStyle.Render("2 Proxies")
-	if m.activeTab == tabDashboard {
+	settTab := tabInactiveStyle.Render("3 Settings")
+	switch m.activeTab {
+	case tabDashboard:
 		dashTab = tabActiveStyle.Render("1 Dashboard")
-	} else {
+	case tabProxies:
 		proxTab = tabActiveStyle.Render("2 Proxies")
+	case tabSettings:
+		settTab = tabActiveStyle.Render("3 Settings")
 	}
 	leftNav := fmt.Sprintf(
-		"%s   %s  %s",
+		"%s   %s  %s  %s",
 		badgeStyle.Render("MANTA"),
 		zone.Mark("tab:dashboard", dashTab),
 		zone.Mark("tab:proxies", proxTab),
+		zone.Mark("tab:settings", settTab),
 	)
 
 	connBadge := pillOfflineStyle.Render("● OFFLINE")
@@ -1538,10 +1678,13 @@ func (m model) View() string {
 
 	// Main workspace
 	var body string
-	if m.activeTab == tabDashboard {
+	switch m.activeTab {
+	case tabDashboard:
 		body = m.renderDashboard(w, bodyH)
-	} else {
+	case tabProxies:
 		body = m.renderProxies(w, leftBoxW, rightBoxW, bodyH)
+	case tabSettings:
+		body = m.renderSettings(w, bodyH)
 	}
 
 	// Single smart footer row: transient colored Toast OR contextual key hints
@@ -1572,12 +1715,124 @@ func (m model) renderFooter(w int) string {
 	}
 
 	var hints string
-	if m.activeTab == tabDashboard {
-		hints = "1/2: Switch Tab  •  Click any switch above  •  p: Daemon  •  u: TUN  •  s: SysProxy  •  m: Mode  •  i: Check IP  •  r: Refresh  •  q: Quit"
-	} else {
-		hints = "1/2: Switch Tab  •  Click/Enter: Switch Node  •  /: Search  •  o: Sort Speed  •  t/T: Test Node/Group  •  Tab: Switch Pane  •  q: Quit"
+	switch m.activeTab {
+	case tabDashboard:
+		hints = "1/2/3: Tabs  •  Click any switch above  •  p: Daemon  •  u: TUN  •  s: SysProxy  •  m: Mode  •  i: Check IP  •  r: Refresh  •  q: Quit"
+	case tabProxies:
+		hints = "1/2/3: Tabs  •  Click/Enter: Switch Node  •  /: Search  •  o: Sort Speed  •  t/T: Test Node/Group  •  Tab: Pane  •  q: Quit"
+	case tabSettings:
+		hints = "1/2/3: Tabs  •  Click any setting to toggle & auto-save to ~/.config/manta/config.yaml  •  q: Quit"
 	}
 	return dimStyle.Render(ansi.Truncate(hints, w, "…"))
+}
+
+func (m model) renderSettings(totalW, bodyH int) string {
+	halfW := (totalW - 5) / 2
+	if halfW < 32 {
+		halfW = 32
+	}
+	rightHalfW := (totalW - 5) - halfW
+	cardInnerH := bodyH - 2
+	if cardInnerH < 10 {
+		cardInnerH = 10
+	}
+
+	seg := func(id, label string, active bool) string {
+		st := segInactiveStyle
+		if active {
+			st = segActiveStyle
+		}
+		return zone.Mark(id, st.Render(label))
+	}
+
+	// Left Card: UI & Behavior Preferences
+	lw := halfW - 2
+	sortSeg := seg("set:sort:speed", "Speed ↑", m.sortByFast) + " " +
+		seg("set:sort:default", "Original", !m.sortByFast)
+
+	startTab := strings.ToLower(m.cfg.StartupTab)
+	if startTab == "" {
+		startTab = "dashboard"
+	}
+	startSeg := seg("set:start:dashboard", "Dashboard", startTab == "dashboard") + " " +
+		seg("set:start:proxies", "Proxies", startTab == "proxies") + " " +
+		seg("set:start:last", "Last Used", startTab == "last")
+
+	autoTestSwitch := zone.Mark("set:autotest", switchOffStyle.Render("○ OFF"))
+	if m.cfg.AutoTestOnOpen {
+		autoTestSwitch = zone.Mark("set:autotest", switchOnStyle.Render("● ON"))
+	}
+
+	lastGrp := m.cfg.LastGroup
+	if lastGrp == "" {
+		lastGrp = "(auto)"
+	}
+
+	leftLines := []string{
+		joinLeftRight(cardTitleStyle.Render("Preferences"), dimStyle.Render("auto-saved"), lw),
+		dimStyle.Render(strings.Repeat("─", lw)),
+		"",
+		kvLineRaw("Node Sort", sortSeg),
+		"",
+		kvLineRaw("Startup Tab", startSeg),
+		"",
+		kvLineRaw("Auto-Test", autoTestSwitch),
+		dimStyle.Render("               Automatically test group latency when opening TUI"),
+		"",
+		kvLine("Last Group", kvValStyle.Render(lastGrp), lw),
+	}
+	leftCard := cardStyle.Width(halfW).Height(cardInnerH).MaxHeight(cardInnerH + 2).Render(strings.Join(leftLines, "\n"))
+
+	// Right Card: Core & Network Settings
+	rw := rightHalfW - 2
+	curMode := strings.ToLower(m.mode)
+	modeSeg := seg("set:mode:rule", "RULE", curMode == "rule") + " " +
+		seg("set:mode:global", "GLOBAL", curMode == "global") + " " +
+		seg("set:mode:direct", "DIRECT", curMode == "direct")
+
+	tunSwitch := zone.Mark("set:tun", switchOffStyle.Render("○ OFF"))
+	if m.tunOn {
+		tunSwitch = zone.Mark("set:tun", switchOnStyle.Render("● ON"))
+	}
+
+	sysSwitch := dimStyle.Render("macOS only")
+	if runtime.GOOS == "darwin" {
+		if m.sysProxyOn {
+			sysSwitch = zone.Mark("set:sysproxy", switchOnStyle.Render("● ON"))
+		} else {
+			sysSwitch = zone.Mark("set:sysproxy", switchOffStyle.Render("○ OFF"))
+		}
+	}
+
+	lanSwitch := zone.Mark("set:lan", switchOffStyle.Render("○ OFF"))
+	if m.allowLan {
+		lanSwitch = zone.Mark("set:lan", switchOnStyle.Render("● ON"))
+	}
+
+	cfgPath := "~/.config/manta/config.yaml"
+	if m.mgr != nil && m.mgr.Paths.ConfigFile != "" {
+		cfgPath = m.mgr.Paths.ConfigFile
+	}
+
+	rightLines := []string{
+		joinLeftRight(cardTitleStyle.Render("Core & Network"), dimStyle.Render("mihomo "+m.version), rw),
+		dimStyle.Render(strings.Repeat("─", rw)),
+		"",
+		kvLineRaw("Routing Mode", modeSeg),
+		"",
+		kvLineRaw("TUN Capture", tunSwitch),
+		"",
+		kvLineRaw("macOS Proxy", sysSwitch),
+		"",
+		kvLineRaw("Allow LAN", lanSwitch),
+		"",
+		kvLine("Mixed Port", fmt.Sprintf("127.0.0.1:%d (HTTP + SOCKS5)", m.cfg.MixedPort), rw),
+		kvLine("Controller", "http://"+m.cfg.Controller, rw),
+		kvLine("Config File", dimStyle.Render(cfgPath), rw),
+	}
+	rightCard := cardStyle.Width(rightHalfW).Height(cardInnerH).MaxHeight(cardInnerH + 2).Render(strings.Join(rightLines, "\n"))
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, leftCard, " ", rightCard)
 }
 
 func (m model) renderProxies(w, leftBoxW, rightBoxW, bodyH int) string {
