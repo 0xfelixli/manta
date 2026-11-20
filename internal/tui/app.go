@@ -40,7 +40,8 @@ const (
 type toastKind int
 
 const (
-	toastInfo toastKind = iota
+	toastNone toastKind = iota
+	toastInfo
 	toastBusy
 	toastSuccess
 	toastWarn
@@ -83,12 +84,12 @@ type trafficSampleMsg struct {
 }
 
 type actionResultMsg struct {
-	status       string
-	kind         toastKind
-	err          error
-	reload       bool
-	refreshIP    bool
-	sysProxyOn   *bool
+	status     string
+	kind       toastKind
+	err        error
+	reload     bool
+	refreshIP  bool
+	sysProxyOn *bool
 }
 
 type delayResultMsg struct {
@@ -96,6 +97,10 @@ type delayResultMsg struct {
 	label    string
 	single   bool
 	autoSort bool
+}
+
+type toastExpireMsg struct {
+	seq int
 }
 
 // Adaptive styles for both light (white) and dark terminals.
@@ -125,12 +130,8 @@ var (
 			Padding(0, 1)
 
 	tabInactiveStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.AdaptiveColor{Light: "#334155", Dark: "#CBD5E1"}).
-				Background(lipgloss.AdaptiveColor{Light: "#E2E8F0", Dark: "#1E293B"}).
+				Foreground(lipgloss.AdaptiveColor{Light: "#475569", Dark: "#94A3B8"}).
 				Padding(0, 1)
-
-	headerMetaStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#334155", Dark: "#CBD5E1"})
 
 	exitLabelStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -160,6 +161,34 @@ var (
 			Foreground(lipgloss.AdaptiveColor{Light: "#0284C7", Dark: "#38BDF8"}).
 			Bold(true)
 
+	// Inline interactive switches & segmented controls
+	switchOnStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.AdaptiveColor{Light: "#065F46", Dark: "#D1FAE5"}).
+			Background(lipgloss.AdaptiveColor{Light: "#D1FAE5", Dark: "#065F46"}).
+			Padding(0, 1)
+
+	switchOffStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{Light: "#475569", Dark: "#CBD5E1"}).
+			Background(lipgloss.AdaptiveColor{Light: "#E2E8F0", Dark: "#334155"}).
+			Padding(0, 1)
+
+	segActiveStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Background(lipgloss.AdaptiveColor{Light: "#0284C7", Dark: "#0EA5E9"}).
+			Padding(0, 1)
+
+	segInactiveStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.AdaptiveColor{Light: "#475569", Dark: "#94A3B8"}).
+				Background(lipgloss.AdaptiveColor{Light: "#F1F5F9", Dark: "#1E293B"}).
+				Padding(0, 1)
+
+	miniBtnStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{Light: "#0369A1", Dark: "#7DD3FC"}).
+			Background(lipgloss.AdaptiveColor{Light: "#E0F2FE", Dark: "#0C4A6E"}).
+			Padding(0, 1)
+
 	btnStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "#1E293B", Dark: "#E2E8F0"}).
 			Background(lipgloss.AdaptiveColor{Light: "#E2E8F0", Dark: "#334155"}).
@@ -169,12 +198,6 @@ var (
 			Bold(true).
 			Foreground(lipgloss.AdaptiveColor{Light: "#0369A1", Dark: "#E0F2FE"}).
 			Background(lipgloss.AdaptiveColor{Light: "#E0F2FE", Dark: "#0369A1"}).
-			Padding(0, 1)
-
-	btnOnStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.AdaptiveColor{Light: "#065F46", Dark: "#D1FAE5"}).
-			Background(lipgloss.AdaptiveColor{Light: "#D1FAE5", Dark: "#065F46"}).
 			Padding(0, 1)
 
 	paneBorderActive = lipgloss.NewStyle().
@@ -387,7 +410,7 @@ type model struct {
 
 	toastText string
 	toastType toastKind
-	toastTime time.Time
+	toastSeq  int
 }
 
 func newStyledList(title string, delegate list.ItemDelegate) list.Model {
@@ -436,9 +459,8 @@ func Run(cfg *config.AppConfig, mgr *core.Manager, client *api.Client) error {
 		spin:          sp,
 		busy:          true,
 		checkingIP:    true,
-		toastText:     "Connecting to mihomo & checking exit IP...",
+		toastText:     "Connecting to mihomo...",
 		toastType:     toastBusy,
-		toastTime:     time.Now(),
 	}
 
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
@@ -446,10 +468,19 @@ func Run(cfg *config.AppConfig, mgr *core.Manager, client *api.Client) error {
 	return err
 }
 
-func (m *model) setToast(kind toastKind, text string) {
+// setToast shows a transient colored feedback banner on the single footer line.
+// Non-busy toasts automatically fade back to contextual key hints after 4 seconds.
+func (m *model) setToast(kind toastKind, text string) tea.Cmd {
+	m.toastSeq++
 	m.toastType = kind
 	m.toastText = text
-	m.toastTime = time.Now()
+	if kind == toastBusy || kind == toastNone {
+		return nil
+	}
+	seq := m.toastSeq
+	return tea.Tick(4*time.Second, func(time.Time) tea.Msg {
+		return toastExpireMsg{seq: seq}
+	})
 }
 
 func (m model) Init() tea.Cmd {
@@ -555,16 +586,42 @@ func (m model) toggleProxyDaemonCmd() tea.Cmd {
 	}
 }
 
+func (m model) setModeCmd(target string) tea.Cmd {
+	return func() tea.Msg {
+		if err := m.client.SetMode(target); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{
+			status:    fmt.Sprintf("✓ Routing mode → %s", strings.ToUpper(target)),
+			kind:      toastSuccess,
+			reload:    true,
+			refreshIP: true,
+		}
+	}
+}
+
+func (m model) cycleModeCmd() tea.Cmd {
+	next := "rule"
+	switch strings.ToLower(m.mode) {
+	case "rule":
+		next = "global"
+	case "global":
+		next = "direct"
+	default:
+		next = "rule"
+	}
+	return m.setModeCmd(next)
+}
+
 func (m model) toggleTunCmd() tea.Cmd {
 	wantOn := !m.tunOn
 	return func() tea.Msg {
 		if err := m.client.SetTun(wantOn); err != nil {
 			if wantOn {
-				return actionResultMsg{err: fmt.Errorf("TUN requires root privileges (restart with `sudo manta up --tun`): %w", err)}
+				return actionResultMsg{err: fmt.Errorf("TUN needs root (`sudo manta up --tun`): %w", err)}
 			}
 			return actionResultMsg{err: err}
 		}
-		// Verify mihomo actually enabled TUN (non-root mihomo may silently ignore enable=true).
 		if live, err := m.client.GetConfigs(); err == nil && live.Tun.Enable != wantOn {
 			return actionResultMsg{
 				status: "⚠ TUN needs root: run `manta down && sudo manta up --tun`",
@@ -573,17 +630,9 @@ func (m model) toggleTunCmd() tea.Cmd {
 			}
 		}
 		if wantOn {
-			return actionResultMsg{
-				status: "✓ TUN mode enabled (all system & terminal traffic captured)",
-				kind:   toastSuccess,
-				reload: true,
-			}
+			return actionResultMsg{status: "✓ TUN mode ON (full-system capture)", kind: toastSuccess, reload: true}
 		}
-		return actionResultMsg{
-			status: "✓ TUN mode disabled",
-			kind:   toastWarn,
-			reload: true,
-		}
+		return actionResultMsg{status: "✓ TUN mode OFF", kind: toastWarn, reload: true}
 	}
 }
 
@@ -594,17 +643,9 @@ func (m model) toggleAllowLanCmd() tea.Cmd {
 			return actionResultMsg{err: err}
 		}
 		if wantOn {
-			return actionResultMsg{
-				status: fmt.Sprintf("✓ Allow LAN ON (LAN devices can use port %d)", m.cfg.MixedPort),
-				kind:   toastSuccess,
-				reload: true,
-			}
+			return actionResultMsg{status: fmt.Sprintf("✓ Allow LAN ON (port %d)", m.cfg.MixedPort), kind: toastSuccess, reload: true}
 		}
-		return actionResultMsg{
-			status: "✓ Allow LAN OFF (localhost only)",
-			kind:   toastInfo,
-			reload: true,
-		}
+		return actionResultMsg{status: "✓ Allow LAN OFF", kind: toastInfo, reload: true}
 	}
 }
 
@@ -633,10 +674,10 @@ func (m model) updateSubCmd() tea.Cmd {
 			return actionResultMsg{err: err}
 		}
 		if err := m.client.ReloadConfig(m.mgr.Paths.RuntimeFile); err != nil {
-			return actionResultMsg{err: fmt.Errorf("downloaded profile, reload failed: %w", err)}
+			return actionResultMsg{err: fmt.Errorf("profile saved, reload failed: %w", err)}
 		}
 		return actionResultMsg{
-			status:    fmt.Sprintf("✓ Updated & hot-reloaded subscription %q", name),
+			status:    fmt.Sprintf("✓ Updated & reloaded subscription %q", name),
 			kind:      toastSuccess,
 			reload:    true,
 			refreshIP: true,
@@ -666,7 +707,7 @@ func (m model) toggleSysProxyCmd() tea.Cmd {
 			}
 			on := true
 			return actionResultMsg{
-				status:     fmt.Sprintf("✓ System proxy ON [%s] → 127.0.0.1:%d", strings.Join(services, ", "), port),
+				status:     fmt.Sprintf("✓ System proxy ON [%s]", strings.Join(services, ", ")),
 				kind:       toastSuccess,
 				sysProxyOn: &on,
 			}
@@ -709,30 +750,7 @@ func (m model) selectNodeCmd(group, node string) tea.Cmd {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{
-			status:    fmt.Sprintf("✓ Switched %s → %s (refreshing exit IP...)", group, node),
-			kind:      toastSuccess,
-			reload:    true,
-			refreshIP: true,
-		}
-	}
-}
-
-func (m model) cycleModeCmd() tea.Cmd {
-	next := "rule"
-	switch strings.ToLower(m.mode) {
-	case "rule":
-		next = "global"
-	case "global":
-		next = "direct"
-	default:
-		next = "rule"
-	}
-	return func() tea.Msg {
-		if err := m.client.SetMode(next); err != nil {
-			return actionResultMsg{err: err}
-		}
-		return actionResultMsg{
-			status:    fmt.Sprintf("✓ Routing mode switched to %s", strings.ToUpper(next)),
+			status:    fmt.Sprintf("✓ Switched %s → %s", group, node),
 			kind:      toastSuccess,
 			reload:    true,
 			refreshIP: true,
@@ -780,23 +798,33 @@ func (m *model) setFocus(p pane) {
 }
 
 func (m *model) syncSizes() {
-	_, _, leftBoxW, rightBoxW, paneInnerH := m.layout()
+	_, _, leftBoxW, rightBoxW, bodyH := m.layout()
+	// Proxies tab has a 1-row action bar above the two panes.
+	paneInnerH := bodyH - 3
+	if paneInnerH < 5 {
+		paneInnerH = 5
+	}
 	m.groupList.SetSize(leftBoxW-2, paneInnerH)
 	m.nodeList.SetSize(rightBoxW-2, paneInnerH)
 }
 
-func (m model) layout() (w, h, leftBoxW, rightBoxW, paneInnerH int) {
+// Vertical budget (ultra-clean):
+//   Row 0: 1-line Nav Header (MANTA + Tabs + Online + Live Speed)
+//   Row 1..1+bodyH-1: Main workspace (Dashboard 2x2 grid OR Proxies toolbar+panes)
+//   Last Row: 1-line Smart Footer (transient Toast OR contextual key hints)
+// Total = bodyH + 2 <= h.
+func (m model) layout() (w, h, leftBoxW, rightBoxW, bodyH int) {
 	w = m.width
 	if w < 64 {
 		w = 80
 	}
 	h = m.height
-	if h < 15 {
+	if h < 16 {
 		h = 24
 	}
-	paneInnerH = h - 7
-	if paneInnerH < 6 {
-		paneInnerH = 6
+	bodyH = h - 2
+	if bodyH < 12 {
+		bodyH = 12
 	}
 	usable := w - 5
 	leftBoxW = usable * 32 / 100
@@ -823,7 +851,6 @@ func (m model) selectedGroup() (api.ProxyInfo, bool) {
 }
 
 func (m model) primarySelectorGroup() (api.ProxyInfo, bool) {
-	// Prefer the main proxy selector group (e.g. 🚀节点选择 / PROXY / Proxy) when on Dashboard.
 	if m.activeTab == tabDashboard {
 		for _, item := range m.groupList.Items() {
 			if g, ok := item.(groupItem); ok && g.kind == "Selector" {
@@ -918,7 +945,7 @@ func (m *model) rebuildNodeList(preserveSelection bool) {
 	}
 	sortTag := ""
 	if m.sortByFast {
-		sortTag = " • Sorted by Speed ↑"
+		sortTag = " • Speed ↑"
 	}
 	m.nodeList.Title = fmt.Sprintf("%s  [%s • %s%s]", g.Name, g.Type, badge, sortTag)
 
@@ -967,12 +994,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spin, cmd = m.spin.Update(msg)
 		return m, cmd
 
+	case toastExpireMsg:
+		if msg.seq == m.toastSeq && m.toastType != toastBusy {
+			m.toastType = toastNone
+			m.toastText = ""
+		}
+		return m, nil
+
 	case stateLoadedMsg:
 		m.busy = false
 		if msg.err != nil {
 			m.online = false
-			m.setToast(toastError, fmt.Sprintf("✗ Offline: %v (run `manta up`)", msg.err))
-			return m, nil
+			return m, m.setToast(toastError, fmt.Sprintf("✗ Offline: %v", msg.err))
 		}
 		m.online = true
 		m.version = msg.version
@@ -1043,7 +1076,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.rebuildNodeList(true)
 		if firstLoad {
-			m.setToast(toastSuccess, fmt.Sprintf("✓ Connected to mihomo %s • %d groups ready", m.version, len(ordered)))
+			m.toastType = toastNone
+			m.toastText = ""
 		}
 		return m, nil
 
@@ -1051,13 +1085,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.checkingIP = false
 		if msg.err != nil {
 			m.exitIPErr = msg.err.Error()
-			m.setToast(toastWarn, "⚠ Exit IP lookup failed: "+msg.err.Error())
-			return m, nil
+			return m, m.setToast(toastWarn, "⚠ Exit IP lookup failed")
 		}
 		m.exitIPErr = ""
 		m.exitIP = msg.info
-		loc := strings.TrimSpace(strings.Join([]string{msg.info.Country, msg.info.City}, ", "))
-		m.setToast(toastSuccess, fmt.Sprintf("✓ Exit IP: %s (%s • %s)", msg.info.IP, loc, msg.info.ISP))
+		if m.toastType == toastBusy {
+			return m, m.setToast(toastSuccess, "✓ Exit IP updated")
+		}
 		return m, nil
 
 	case connsPollMsg:
@@ -1085,14 +1119,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		m.busy = false
 		if msg.err != nil {
-			m.setToast(toastError, "✗ "+msg.err.Error())
-			return m, nil
+			return m, m.setToast(toastError, "✗ "+msg.err.Error())
 		}
-		m.setToast(msg.kind, msg.status)
+		var cmds []tea.Cmd
+		if cmd := m.setToast(msg.kind, msg.status); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		if msg.sysProxyOn != nil {
 			m.sysProxyOn = *msg.sysProxyOn
 		}
-		var cmds []tea.Cmd
 		if msg.reload {
 			cmds = append(cmds, m.loadStateCmd())
 		}
@@ -1124,16 +1159,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.single {
 			d := msg.results[msg.label]
 			if d > 0 {
-				m.setToast(toastSuccess, fmt.Sprintf("✓ %s: %dms", msg.label, d))
-			} else {
-				m.setToast(toastError, fmt.Sprintf("✗ %s: timeout", msg.label))
+				return m, m.setToast(toastSuccess, fmt.Sprintf("✓ %s: %dms", msg.label, d))
 			}
-		} else if bestName != "" {
-			m.setToast(toastSuccess, fmt.Sprintf("✓ Tested %s (%d/%d alive, sorted) • Fastest: %s (%dms)", msg.label, okCount, len(msg.results), bestName, bestMs))
-		} else {
-			m.setToast(toastWarn, fmt.Sprintf("⚠ Tested %s: all %d nodes timed out", msg.label, len(msg.results)))
+			return m, m.setToast(toastError, fmt.Sprintf("✗ %s: timeout", msg.label))
 		}
-		return m, nil
+		if bestName != "" {
+			return m, m.setToast(toastSuccess, fmt.Sprintf("✓ %d/%d alive (sorted) • Fastest: %s (%dms)", okCount, len(msg.results), bestName, bestMs))
+		}
+		return m, m.setToast(toastWarn, fmt.Sprintf("⚠ All %d nodes timed out", len(msg.results)))
 
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
@@ -1154,26 +1187,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "1":
 			m.activeTab = tabDashboard
-			m.setToast(toastInfo, "Viewing Dashboard")
 			return m, nil
 
 		case "2":
 			m.activeTab = tabProxies
-			m.setToast(toastInfo, "Viewing Proxies")
 			return m, nil
-
-		case "i":
-			m.checkingIP = true
-			m.setToast(toastBusy, "Checking exit IP & geolocation...")
-			return m, m.fetchExitIPCmd()
 
 		case "p":
 			m.busy = true
+			label := "Starting proxy daemon..."
 			if m.online {
-				m.setToast(toastBusy, "Stopping manta proxy daemon...")
-			} else {
-				m.setToast(toastBusy, "Starting manta proxy daemon...")
+				label = "Stopping proxy daemon..."
 			}
+			m.setToast(toastBusy, label)
 			return m, m.toggleProxyDaemonCmd()
 
 		case "u":
@@ -1196,14 +1222,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setToast(toastBusy, "Switching routing mode...")
 			return m, m.cycleModeCmd()
 
+		case "i":
+			m.checkingIP = true
+			m.setToast(toastBusy, "Checking exit IP...")
+			return m, m.fetchExitIPCmd()
+
 		case "r":
 			m.busy = true
 			m.checkingIP = true
-			m.setToast(toastBusy, "Refreshing state & exit IP...")
+			m.setToast(toastBusy, "Refreshing...")
 			return m, tea.Batch(m.loadStateCmd(), m.fetchExitIPCmd())
 		}
 
-		// Proxies-tab specific keys
 		if m.activeTab == tabProxies {
 			switch msg.String() {
 			case "tab", "left", "right", "h", "l":
@@ -1241,11 +1271,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sortByFast = !m.sortByFast
 				m.rebuildNodeList(true)
 				if m.sortByFast {
-					m.setToast(toastInfo, "↕ Sorted nodes by speed (fastest first)")
-				} else {
-					m.setToast(toastInfo, "↕ Restored default node order")
+					return m, m.setToast(toastInfo, "↕ Sorted by speed (fastest first)")
 				}
-				return m, nil
+				return m, m.setToast(toastInfo, "↕ Restored default order")
 			}
 			return m.updateActiveList(msg)
 		}
@@ -1265,7 +1293,7 @@ func (m model) activateSelectedNode() (tea.Model, tea.Cmd) {
 	}
 	if g.Type != "Selector" {
 		m.busy = true
-		m.setToast(toastBusy, fmt.Sprintf("%s is auto-managed; testing %s...", g.Name, node.name))
+		m.setToast(toastBusy, fmt.Sprintf("Auto group; testing %s...", node.name))
 		return m, m.testNodesCmd([]string{node.name}, node.name, true, false)
 	}
 	g.Now = node.name
@@ -1312,66 +1340,93 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Global clickable tabs & toolbar buttons
+	// Global top nav tabs
 	switch {
 	case zone.Get("tab:dashboard").InBounds(msg):
 		m.activeTab = tabDashboard
-		m.setToast(toastInfo, "Viewing Dashboard")
 		return m, nil
-
 	case zone.Get("tab:proxies").InBounds(msg):
 		m.activeTab = tabProxies
-		m.setToast(toastInfo, "Viewing Proxies")
 		return m, nil
+	}
 
-	case zone.Get("btn:proxy").InBounds(msg):
-		m.busy = true
-		if m.online {
-			m.setToast(toastBusy, "Stopping manta proxy daemon...")
-		} else {
-			m.setToast(toastBusy, "Starting manta proxy daemon...")
+	// Dashboard inline controls
+	if m.activeTab == tabDashboard {
+		switch {
+		case zone.Get("ctl:proxy").InBounds(msg):
+			m.busy = true
+			label := "Starting proxy daemon..."
+			if m.online {
+				label = "Stopping proxy daemon..."
+			}
+			m.setToast(toastBusy, label)
+			return m, m.toggleProxyDaemonCmd()
+
+		case zone.Get("ctl:mode:rule").InBounds(msg):
+			m.busy = true
+			m.setToast(toastBusy, "Switching mode → RULE...")
+			return m, m.setModeCmd("rule")
+
+		case zone.Get("ctl:mode:global").InBounds(msg):
+			m.busy = true
+			m.setToast(toastBusy, "Switching mode → GLOBAL...")
+			return m, m.setModeCmd("global")
+
+		case zone.Get("ctl:mode:direct").InBounds(msg):
+			m.busy = true
+			m.setToast(toastBusy, "Switching mode → DIRECT...")
+			return m, m.setModeCmd("direct")
+
+		case zone.Get("ctl:tun").InBounds(msg):
+			m.busy = true
+			m.setToast(toastBusy, "Toggling TUN mode...")
+			return m, m.toggleTunCmd()
+
+		case zone.Get("ctl:sysproxy").InBounds(msg):
+			m.busy = true
+			m.setToast(toastBusy, "Toggling macOS system proxy...")
+			return m, m.toggleSysProxyCmd()
+
+		case zone.Get("ctl:lan").InBounds(msg):
+			m.busy = true
+			m.setToast(toastBusy, "Toggling Allow LAN...")
+			return m, m.toggleAllowLanCmd()
+
+		case zone.Get("ctl:updatesub").InBounds(msg):
+			m.busy = true
+			m.setToast(toastBusy, "Updating subscription...")
+			return m, m.updateSubCmd()
+
+		case zone.Get("ctl:checkip").InBounds(msg):
+			m.checkingIP = true
+			m.setToast(toastBusy, "Checking exit IP...")
+			return m, m.fetchExitIPCmd()
 		}
-		return m, m.toggleProxyDaemonCmd()
 
-	case zone.Get("btn:tun").InBounds(msg):
-		m.busy = true
-		m.setToast(toastBusy, "Toggling TUN mode...")
-		return m, m.toggleTunCmd()
+		for i, item := range m.groupList.Items() {
+			if zone.Get(fmt.Sprintf("dashgrp:%d", i)).InBounds(msg) {
+				m.groupList.Select(i)
+				m.rebuildNodeList(false)
+				m.activeTab = tabProxies
+				m.setFocus(paneNodes)
+				if g, ok := item.(groupItem); ok {
+					return m, m.setToast(toastInfo, fmt.Sprintf("Opened %s (%d nodes)", g.name, g.count))
+				}
+				return m, nil
+			}
+		}
+		return m, nil
+	}
 
-	case zone.Get("btn:lan").InBounds(msg):
-		m.busy = true
-		m.setToast(toastBusy, "Toggling Allow LAN...")
-		return m, m.toggleAllowLanCmd()
-
-	case zone.Get("btn:updatesub").InBounds(msg):
-		m.busy = true
-		m.setToast(toastBusy, "Updating subscription & hot-reloading...")
-		return m, m.updateSubCmd()
-
-	case zone.Get("btn:mode").InBounds(msg):
-		m.busy = true
-		m.setToast(toastBusy, "Switching routing mode...")
-		return m, m.cycleModeCmd()
-
-	case zone.Get("btn:sysproxy").InBounds(msg):
-		m.busy = true
-		m.setToast(toastBusy, "Toggling macOS system proxy...")
-		return m, m.toggleSysProxyCmd()
-
-	case zone.Get("btn:checkip").InBounds(msg):
-		m.checkingIP = true
-		m.setToast(toastBusy, "Checking exit IP & geolocation...")
-		return m, m.fetchExitIPCmd()
-
+	// Proxies tab toolbar & lists
+	switch {
 	case zone.Get("btn:sort").InBounds(msg):
 		m.sortByFast = !m.sortByFast
 		m.rebuildNodeList(true)
 		if m.sortByFast {
-			m.setToast(toastInfo, "↕ Sorted nodes by speed (fastest first)")
-		} else {
-			m.setToast(toastInfo, "↕ Restored default node order")
+			return m, m.setToast(toastInfo, "↕ Sorted by speed (fastest first)")
 		}
-		return m, nil
+		return m, m.setToast(toastInfo, "↕ Restored default order")
 
 	case zone.Get("btn:testnode").InBounds(msg):
 		if node, ok := m.nodeList.SelectedItem().(nodeItem); ok {
@@ -1390,59 +1445,27 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case zone.Get("btn:search").InBounds(msg):
-		m.activeTab = tabProxies
 		m.setFocus(paneNodes)
-		m.setToast(toastInfo, "Type to filter nodes, Enter to apply, Esc to clear")
-		return m.updateActiveList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+		cmd := m.setToast(toastInfo, "Type to filter nodes, Enter to apply, Esc to clear")
+		nm, lcmd := m.updateActiveList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+		return nm, tea.Batch(cmd, lcmd)
 
 	case zone.Get("btn:prev").InBounds(msg):
 		m.setFocus(paneNodes)
 		m.nodeList.Paginator.PrevPage()
-		m.setToast(toastInfo, fmt.Sprintf("Page %d / %d", m.nodeList.Paginator.Page+1, m.nodeList.Paginator.TotalPages))
 		return m, nil
 
 	case zone.Get("btn:next").InBounds(msg):
 		m.setFocus(paneNodes)
 		m.nodeList.Paginator.NextPage()
-		m.setToast(toastInfo, fmt.Sprintf("Page %d / %d", m.nodeList.Paginator.Page+1, m.nodeList.Paginator.TotalPages))
-		return m, nil
-
-	case zone.Get("btn:refresh").InBounds(msg):
-		m.busy = true
-		m.checkingIP = true
-		m.setToast(toastBusy, "Refreshing state & exit IP...")
-		return m, tea.Batch(m.loadStateCmd(), m.fetchExitIPCmd())
-
-	case zone.Get("btn:quit").InBounds(msg):
-		m.cancel()
-		return m, tea.Quit
-	}
-
-	if m.activeTab != tabProxies {
-		// Dashboard: clicking a group in the Groups Overview jumps directly to that group in Proxies tab.
-		for i, item := range m.groupList.Items() {
-			if zone.Get(fmt.Sprintf("dashgrp:%d", i)).InBounds(msg) {
-				m.groupList.Select(i)
-				m.rebuildNodeList(false)
-				m.activeTab = tabProxies
-				m.setFocus(paneNodes)
-				if g, ok := item.(groupItem); ok {
-					m.setToast(toastInfo, fmt.Sprintf("Jumped to %s (%d nodes)", g.name, g.count))
-				}
-				return m, nil
-			}
-		}
 		return m, nil
 	}
 
-	for i, item := range m.groupList.VisibleItems() {
+	for i := range m.groupList.VisibleItems() {
 		if zone.Get(fmt.Sprintf("group:%d", i)).InBounds(msg) {
 			m.setFocus(paneGroups)
 			m.groupList.Select(i)
 			m.rebuildNodeList(false)
-			if g, ok := item.(groupItem); ok {
-				m.setToast(toastInfo, fmt.Sprintf("Viewing %s (%s • active: %s)", g.name, g.kind, g.now))
-			}
 			return m, nil
 		}
 	}
@@ -1455,7 +1478,7 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if msg.Y >= 3 {
+	if msg.Y >= 2 {
 		if msg.X < leftOuterW {
 			m.setFocus(paneGroups)
 		} else {
@@ -1466,13 +1489,9 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	w, _, leftBoxW, rightBoxW, paneInnerH := m.layout()
+	w, _, leftBoxW, rightBoxW, bodyH := m.layout()
 
-	// Row 0: Header with tabs, online badge, and live speed
-	connBadge := pillOfflineStyle.Render("● OFFLINE")
-	if m.online {
-		connBadge = pillOnlineStyle.Render("● ONLINE")
-	}
+	// Row 0: Single-line clean navigation bar (zero duplication)
 	dashTab := tabInactiveStyle.Render("1 Dashboard")
 	proxTab := tabInactiveStyle.Render("2 Proxies")
 	if m.activeTab == tabDashboard {
@@ -1480,204 +1499,183 @@ func (m model) View() string {
 	} else {
 		proxTab = tabActiveStyle.Render("2 Proxies")
 	}
-	leftHeader := fmt.Sprintf(
-		"%s %s  %s %s",
+	leftNav := fmt.Sprintf(
+		"%s  %s %s",
 		badgeStyle.Render("MANTA"),
-		connBadge,
 		zone.Mark("tab:dashboard", dashTab),
 		zone.Mark("tab:proxies", proxTab),
 	)
-	rightHeader := fmt.Sprintf("%s  %s", speedUpStyle.Render("↑ "+formatSpeed(m.up)), speedDownStyle.Render("↓ "+formatSpeed(m.down)))
-	header := joinLeftRight(leftHeader, rightHeader, w)
 
-	// Row 1: Quick exit & capture summary
-	_, chain, exitDelay := m.resolveActiveExit()
-	delayTag := ""
-	if exitDelay > 0 {
-		delayTag = " (" + strings.TrimSpace(formatDelayPlain(exitDelay)) + ")"
+	connBadge := pillOfflineStyle.Render("● OFFLINE")
+	if m.online {
+		connBadge = pillOnlineStyle.Render("● ONLINE")
 	}
-	ipBrief := ""
-	if m.exitIP != nil {
-		ipBrief = fmt.Sprintf(" • %s (%s)", m.exitIP.IP, m.exitIP.CountryCode)
-	}
-	exitSummary := ansi.Truncate(
-		fmt.Sprintf("%s %s%s", exitLabelStyle.Render("Exit:"), rowTextStyle.Render(chain+delayTag), dimStyle.Render(ipBrief)),
-		w, "…",
+	rightNav := fmt.Sprintf(
+		"%s  %s  %s",
+		connBadge,
+		speedUpStyle.Render("↑ "+formatSpeed(m.up)),
+		speedDownStyle.Render("↓ "+formatSpeed(m.down)),
 	)
+	header := joinLeftRight(leftNav, rightNav, w)
 
-	// Row 2: Action toolbar
-	mode := m.mode
-	if mode == "" {
-		mode = m.cfg.Mode
-	}
-	sysLabel := "SysProxy: OFF"
-	sysStyle := btnStyle
-	if m.sysProxyOn {
-		sysLabel = "SysProxy: ON"
-		sysStyle = btnOnStyle
-	}
-	var buttons []string
-	if m.activeTab == tabDashboard {
-		proxyLabel := "Proxy: OFF"
-		proxyStyle := btnStyle
-		if m.online {
-			proxyLabel = "Proxy: ON"
-			proxyStyle = btnOnStyle
-		}
-		tunLabel := "TUN: OFF"
-		tunStyle := btnStyle
-		if m.tunOn {
-			tunLabel = "TUN: ON"
-			tunStyle = btnOnStyle
-		}
-		lanLabel := "LAN: OFF"
-		lanStyle := btnStyle
-		if m.allowLan {
-			lanLabel = "LAN: ON"
-			lanStyle = btnOnStyle
-		}
-		buttons = append(buttons,
-			zone.Mark("btn:proxy", proxyStyle.Render(proxyLabel)),
-			zone.Mark("btn:mode", btnAccentStyle.Render("Mode: "+strings.ToUpper(mode))),
-			zone.Mark("btn:tun", tunStyle.Render(tunLabel)),
-		)
-		if runtime.GOOS == "darwin" {
-			buttons = append(buttons, zone.Mark("btn:sysproxy", sysStyle.Render(sysLabel)))
-		}
-		buttons = append(buttons,
-			zone.Mark("btn:lan", lanStyle.Render(lanLabel)),
-			zone.Mark("btn:checkip", btnStyle.Render("Check IP")),
-			zone.Mark("btn:updatesub", btnStyle.Render("Update Sub")),
-		)
-	} else {
-		buttons = append(buttons,
-			zone.Mark("btn:mode", btnAccentStyle.Render("Mode: "+strings.ToUpper(mode))),
-		)
-		if runtime.GOOS == "darwin" {
-			buttons = append(buttons, zone.Mark("btn:sysproxy", sysStyle.Render(sysLabel)))
-		}
-		sortLabel := "Sort: Default"
-		sortStyle := btnStyle
-		if m.sortByFast {
-			sortLabel = "Sort: Speed ↑"
-			sortStyle = btnAccentStyle
-		}
-		buttons = append(buttons,
-			zone.Mark("btn:sort", sortStyle.Render(sortLabel)),
-			zone.Mark("btn:testnode", btnStyle.Render("Test Node")),
-			zone.Mark("btn:testgroup", btnStyle.Render("Test Group")),
-			zone.Mark("btn:search", btnStyle.Render("Search /")),
-		)
-		if m.nodeList.Paginator.TotalPages > 1 {
-			pageLabel := fmt.Sprintf("%d/%d", m.nodeList.Paginator.Page+1, m.nodeList.Paginator.TotalPages)
-			buttons = append(buttons,
-				zone.Mark("btn:prev", btnStyle.Render("◀")),
-				dimStyle.Render(pageLabel),
-				zone.Mark("btn:next", btnStyle.Render("▶")),
-			)
-		}
-	}
-	buttons = append(buttons,
-		zone.Mark("btn:refresh", btnStyle.Render("Refresh")),
-		zone.Mark("btn:quit", btnStyle.Render("Quit")),
-	)
-	actionBar := strings.Join(buttons, " ")
-
-	// Row 3..: Main content (Dashboard OR Proxies)
+	// Main workspace
 	var body string
 	if m.activeTab == tabDashboard {
-		body = m.renderDashboard(w, paneInnerH)
+		body = m.renderDashboard(w, bodyH)
 	} else {
-		leftStyle := paneBorderInactive.Width(leftBoxW).Height(paneInnerH).MaxHeight(paneInnerH + 2)
-		rightStyle := paneBorderInactive.Width(rightBoxW).Height(paneInnerH).MaxHeight(paneInnerH + 2)
-		if m.focus == paneGroups {
-			leftStyle = paneBorderActive.Width(leftBoxW).Height(paneInnerH).MaxHeight(paneInnerH + 2)
-		} else {
-			rightStyle = paneBorderActive.Width(rightBoxW).Height(paneInnerH).MaxHeight(paneInnerH + 2)
-		}
-		body = lipgloss.JoinHorizontal(lipgloss.Top, leftStyle.Render(m.groupList.View()), " ", rightStyle.Render(m.nodeList.View()))
+		body = m.renderProxies(w, leftBoxW, rightBoxW, bodyH)
 	}
 
-	// Footer: Toast bar
-	ts := m.toastTime.Format("15:04:05")
-	toastMsg := fmt.Sprintf("[%s] %s", ts, m.toastText)
-	if m.busy || m.checkingIP {
-		toastMsg = fmt.Sprintf("[%s] %s %s", ts, m.spin.View(), m.toastText)
-	}
-	toastMsg = ansi.Truncate(toastMsg, w-2, "…")
-	var toastRendered string
-	switch m.toastType {
-	case toastBusy:
-		toastRendered = toastBusyStyle.Width(w).Render(toastMsg)
-	case toastSuccess:
-		toastRendered = toastSuccessStyle.Width(w).Render(toastMsg)
-	case toastWarn:
-		toastRendered = toastWarnStyle.Width(w).Render(toastMsg)
-	case toastError:
-		toastRendered = toastErrorStyle.Width(w).Render(toastMsg)
-	default:
-		toastRendered = toastInfoStyle.Width(w).Render(toastMsg)
-	}
+	// Single smart footer row: transient colored Toast OR contextual key hints
+	footer := m.renderFooter(w)
 
-	help := dimStyle.Render(ansi.Truncate("1/2: Dashboard/Proxies  •  p: proxy on/off  •  u: TUN  •  s: sysproxy  •  a: LAN  •  m: mode  •  i: IP  •  o: sort  •  q: quit", w, "…"))
-
-	return zone.Scan(lipgloss.JoinVertical(lipgloss.Left, header, exitSummary, actionBar, body, toastRendered, help))
+	return zone.Scan(lipgloss.JoinVertical(lipgloss.Left, header, body, footer))
 }
 
-func (m model) renderDashboard(totalW, paneInnerH int) string {
-	// Compact 2x2 grid:
-	//   Top-Left:  System, Capture Mode & Traffic totals
-	//   Top-Right: Exit IP, Geolocation & Speed Sparkline
-	//   Bot-Left:  Proxy Groups Overview (clickable -> jumps to Proxies tab)
-	//   Bot-Right: Live Active Connections (auto-refreshed every 2s)
+func (m model) renderFooter(w int) string {
+	if m.toastType != toastNone && m.toastText != "" {
+		msg := m.toastText
+		if m.toastType == toastBusy {
+			msg = m.spin.View() + " " + msg
+		}
+		msg = ansi.Truncate(msg, w-2, "…")
+		switch m.toastType {
+		case toastBusy:
+			return toastBusyStyle.Width(w).Render(msg)
+		case toastSuccess:
+			return toastSuccessStyle.Width(w).Render(msg)
+		case toastWarn:
+			return toastWarnStyle.Width(w).Render(msg)
+		case toastError:
+			return toastErrorStyle.Width(w).Render(msg)
+		default:
+			return toastInfoStyle.Width(w).Render(msg)
+		}
+	}
+
+	var hints string
+	if m.activeTab == tabDashboard {
+		hints = "1/2: Switch Tab  •  Click any switch above  •  p: Daemon  •  u: TUN  •  s: SysProxy  •  m: Mode  •  i: Check IP  •  r: Refresh  •  q: Quit"
+	} else {
+		hints = "1/2: Switch Tab  •  Click/Enter: Switch Node  •  /: Search  •  o: Sort Speed  •  t/T: Test Node/Group  •  Tab: Switch Pane  •  q: Quit"
+	}
+	return dimStyle.Render(ansi.Truncate(hints, w, "…"))
+}
+
+func (m model) renderProxies(w, leftBoxW, rightBoxW, bodyH int) string {
+	sortLabel := "Sort: Default"
+	sortStyle := btnStyle
+	if m.sortByFast {
+		sortLabel = "Sort: Speed ↑"
+		sortStyle = btnAccentStyle
+	}
+	toolbar := []string{
+		zone.Mark("btn:sort", sortStyle.Render(sortLabel)),
+		zone.Mark("btn:testnode", btnStyle.Render("Test Node")),
+		zone.Mark("btn:testgroup", btnStyle.Render("Test Group")),
+		zone.Mark("btn:search", btnStyle.Render("Search /")),
+	}
+	if m.nodeList.Paginator.TotalPages > 1 {
+		pageLabel := fmt.Sprintf("%d/%d", m.nodeList.Paginator.Page+1, m.nodeList.Paginator.TotalPages)
+		toolbar = append(toolbar,
+			zone.Mark("btn:prev", btnStyle.Render("◀")),
+			dimStyle.Render(pageLabel),
+			zone.Mark("btn:next", btnStyle.Render("▶")),
+		)
+	}
+	actionRow := strings.Join(toolbar, " ")
+
+	paneInnerH := bodyH - 3
+	if paneInnerH < 5 {
+		paneInnerH = 5
+	}
+	leftStyle := paneBorderInactive.Width(leftBoxW).Height(paneInnerH).MaxHeight(paneInnerH + 2)
+	rightStyle := paneBorderInactive.Width(rightBoxW).Height(paneInnerH).MaxHeight(paneInnerH + 2)
+	if m.focus == paneGroups {
+		leftStyle = paneBorderActive.Width(leftBoxW).Height(paneInnerH).MaxHeight(paneInnerH + 2)
+	} else {
+		rightStyle = paneBorderActive.Width(rightBoxW).Height(paneInnerH).MaxHeight(paneInnerH + 2)
+	}
+	panes := lipgloss.JoinHorizontal(lipgloss.Top, leftStyle.Render(m.groupList.View()), " ", rightStyle.Render(m.nodeList.View()))
+	return lipgloss.JoinVertical(lipgloss.Left, actionRow, panes)
+}
+
+func (m model) renderDashboard(totalW, bodyH int) string {
 	halfW := (totalW - 5) / 2
-	if halfW < 28 {
-		halfW = 28
+	if halfW < 30 {
+		halfW = 30
 	}
 	rightHalfW := (totalW - 5) - halfW
 
-	topCardInnerH := 8
-	botCardInnerH := paneInnerH - topCardInnerH - 2
-	if botCardInnerH < 5 {
-		botCardInnerH = 5
+	// Top cards: 8 inner lines (+2 border = 10); Bottom cards: remaining height.
+	topInnerH := 8
+	botInnerH := bodyH - (topInnerH + 2) - 2
+	if botInnerH < 5 {
+		botInnerH = 5
 	}
 
-	// Top-Left Card: System, Capture Mode & Traffic
-	tunStatus := dimStyle.Render("○ OFF (`sudo manta up --tun`)")
+	// ── Top-Left Card: Controls & Core (Status == Interactive Switch, zero duplication)
+	tlW := halfW - 2
+	daemonSwitch := zone.Mark("ctl:proxy", switchOffStyle.Render("○ STOPPED"))
+	if m.online {
+		daemonSwitch = zone.Mark("ctl:proxy", switchOnStyle.Render("● RUNNING"))
+	}
+
+	curMode := strings.ToLower(m.mode)
+	seg := func(id, label string, active bool) string {
+		st := segInactiveStyle
+		if active {
+			st = segActiveStyle
+		}
+		return zone.Mark(id, st.Render(label))
+	}
+	modeSeg := seg("ctl:mode:rule", "RULE", curMode == "rule") + " " +
+		seg("ctl:mode:global", "GLOBAL", curMode == "global") + " " +
+		seg("ctl:mode:direct", "DIRECT", curMode == "direct")
+
+	tunSwitch := zone.Mark("ctl:tun", switchOffStyle.Render("○ OFF"))
 	if m.tunOn {
 		stack := m.tunStack
 		if stack == "" {
 			stack = "mixed"
 		}
-		tunStatus = activeMarkStyle.Render("● ON (utun • " + stack + ")")
+		tunSwitch = zone.Mark("ctl:tun", switchOnStyle.Render("● ON • "+stack))
 	}
-	sysStatus := dimStyle.Render("○ OFF")
-	if m.sysProxyOn {
-		sysStatus = activeMarkStyle.Render(fmt.Sprintf("● ON (127.0.0.1:%d)", m.cfg.MixedPort))
+
+	sysSwitch := dimStyle.Render("macOS only")
+	if runtime.GOOS == "darwin" {
+		if m.sysProxyOn {
+			sysSwitch = zone.Mark("ctl:sysproxy", switchOnStyle.Render(fmt.Sprintf("● ON • :%d", m.cfg.MixedPort)))
+		} else {
+			sysSwitch = zone.Mark("ctl:sysproxy", switchOffStyle.Render("○ OFF"))
+		}
 	}
+
+	lanSwitch := zone.Mark("ctl:lan", switchOffStyle.Render("○ OFF"))
+	if m.allowLan {
+		lanSwitch = zone.Mark("ctl:lan", switchOnStyle.Render("● ON"))
+	}
+
 	profile := m.cfg.ActiveProfile
 	if profile == "" {
 		profile = "(default)"
 	}
-	trafficSummary := fmt.Sprintf(
-		"%s %s  %s %s",
-		speedUpStyle.Render("↑"+formatBytes(m.totalUp)),
-		dimStyle.Render("|"),
-		speedDownStyle.Render("↓"+formatBytes(m.totalDown)),
-		dimStyle.Render(fmt.Sprintf("(%d conns)", len(m.conns))),
-	)
-	c1Lines := []string{
-		cardTitleStyle.Render("System & Capture Mode"),
-		kvLine("Core", fmt.Sprintf("mihomo %s (%s)", m.version, profile), halfW-2),
-		kvLine("Routing Mode", strings.ToUpper(m.mode), halfW-2),
-		kvLine("TUN Mode", tunStatus, halfW-2),
-		kvLine("SysProxy", sysStatus, halfW-2),
-		kvLine("Local Inbound", fmt.Sprintf("127.0.0.1:%d (HTTP/SOCKS5)", m.cfg.MixedPort), halfW-2),
-		kvLine("Total Traffic", trafficSummary, halfW-2),
-	}
-	card1 := cardStyle.Width(halfW).Height(topCardInnerH).MaxHeight(topCardInnerH + 2).Render(strings.Join(c1Lines, "\n"))
+	profileRow := kvValStyle.Render(profile) + "  " + zone.Mark("ctl:updatesub", miniBtnStyle.Render("↻ Update"))
 
-	// Top-Right Card: Exit IP, Geolocation & Speed Sparkline
+	c1Lines := []string{
+		joinLeftRight(cardTitleStyle.Render("Controls & Core"), dimStyle.Render("mihomo "+m.version), tlW),
+		dimStyle.Render(strings.Repeat("─", tlW)),
+		kvLineRaw("Daemon", daemonSwitch),
+		kvLineRaw("Mode", modeSeg),
+		kvLineRaw("TUN Capture", tunSwitch),
+		kvLineRaw("SysProxy", sysSwitch),
+		kvLineRaw("Allow LAN", lanSwitch),
+		kvLineRaw("Profile", profileRow),
+	}
+	card1 := cardStyle.Width(halfW).Height(topInnerH).MaxHeight(topInnerH + 2).Render(strings.Join(c1Lines, "\n"))
+
+	// ── Top-Right Card: Network & Exit (Exit IP + Geo + Main Route + Traffic)
+	trW := rightHalfW - 2
 	_, chain, exitDelay := m.resolveActiveExit()
 	ipVal := dimStyle.Render("Checking...")
 	locVal := dimStyle.Render("-")
@@ -1688,9 +1686,6 @@ func (m model) renderDashboard(totalW, paneInnerH int) string {
 		if m.exitIP.Country != "" {
 			locParts = append(locParts, m.exitIP.Country)
 		}
-		if m.exitIP.Region != "" && m.exitIP.Region != m.exitIP.City {
-			locParts = append(locParts, m.exitIP.Region)
-		}
 		if m.exitIP.City != "" {
 			locParts = append(locParts, m.exitIP.City)
 		}
@@ -1700,32 +1695,45 @@ func (m model) renderDashboard(totalW, paneInnerH int) string {
 		ipVal = delayBadStyle.Render("Lookup failed")
 		locVal = dimStyle.Render(m.exitIPErr)
 	}
-	spark := renderSparkline(m.downHist, rightHalfW-18)
-	c2Lines := []string{
-		cardTitleStyle.Render("Exit IP & Geolocation"),
-		kvLine("Exit IP", ipVal, rightHalfW-2),
-		kvLine("Location", locVal, rightHalfW-2),
-		kvLine("ISP", ispVal, rightHalfW-2),
-		kvLine("Active Chain", chain, rightHalfW-2),
-		kvLine("Exit Latency", formatDelayStyled(exitDelay), rightHalfW-2),
-		kvLine("Down Speed", speedDownStyle.Render(spark), rightHalfW-2),
+
+	routeVal := chain
+	if exitDelay > 0 {
+		routeVal += " (" + strings.TrimSpace(formatDelayPlain(exitDelay)) + ")"
 	}
-	card2 := cardStyle.Width(rightHalfW).Height(topCardInnerH).MaxHeight(topCardInnerH + 2).Render(strings.Join(c2Lines, "\n"))
+	totalsVal := fmt.Sprintf(
+		"%s  %s  %s",
+		speedUpStyle.Render("↑"+formatBytes(m.totalUp)),
+		speedDownStyle.Render("↓"+formatBytes(m.totalDown)),
+		dimStyle.Render(fmt.Sprintf("• 127.0.0.1:%d", m.cfg.MixedPort)),
+	)
+	spark := renderSparkline(m.downHist, trW-16)
+	checkIPBtn := zone.Mark("ctl:checkip", miniBtnStyle.Render("↻ Check IP"))
+
+	c2Lines := []string{
+		joinLeftRight(cardTitleStyle.Render("Network & Exit"), checkIPBtn, trW),
+		dimStyle.Render(strings.Repeat("─", trW)),
+		kvLine("Exit IP", ipVal, trW),
+		kvLine("Location", locVal, trW),
+		kvLine("ISP", ispVal, trW),
+		kvLine("Main Route", routeVal, trW),
+		kvLine("Session", totalsVal, trW),
+		kvLine("Speed Graph", speedDownStyle.Render(spark), trW),
+	}
+	card2 := cardStyle.Width(rightHalfW).Height(topInnerH).MaxHeight(topInnerH + 2).Render(strings.Join(c2Lines, "\n"))
 
 	topRow := lipgloss.JoinHorizontal(lipgloss.Top, card1, " ", card2)
 
-	// Bottom-Left Card: Clickable Proxy Groups Overview
+	// ── Bottom-Left Card: Clickable Proxy Groups Overview
 	blInnerW := halfW - 2
-	blCap := botCardInnerH - 2
+	blCap := botInnerH - 2
 	if blCap < 1 {
 		blCap = 1
 	}
 	blLines := []string{
-		joinLeftRight(cardTitleStyle.Render("Proxy Groups (click to open)"), dimStyle.Render(fmt.Sprintf("%d groups", len(m.groupList.Items()))), blInnerW),
+		joinLeftRight(cardTitleStyle.Render("Proxy Groups"), dimStyle.Render(fmt.Sprintf("%d groups • click to switch", len(m.groupList.Items()))), blInnerW),
 		dimStyle.Render(strings.Repeat("─", blInnerW)),
 	}
-	allGroups := m.groupList.Items()
-	for i, item := range allGroups {
+	for i, item := range m.groupList.Items() {
 		if i >= blCap {
 			break
 		}
@@ -1733,21 +1741,19 @@ func (m model) renderDashboard(totalW, paneInnerH int) string {
 		if !ok {
 			continue
 		}
-		d := m.finalDelay(g.now)
-		delayStr := formatDelayStyled(d)
+		delayStr := formatDelayStyled(m.finalDelay(g.now))
 		nowMax := blInnerW - 22 - lipgloss.Width(delayStr)
 		if nowMax < 8 {
 			nowMax = 8
 		}
 		leftPart := rowTextStyle.Render(ansi.Truncate(g.name, 16, "…")) + dimStyle.Render(" → ") + exitLabelStyle.Render(ansi.Truncate(g.now, nowMax, "…"))
-		row := joinLeftRight(leftPart, delayStr, blInnerW)
-		blLines = append(blLines, zone.Mark(fmt.Sprintf("dashgrp:%d", i), row))
+		blLines = append(blLines, zone.Mark(fmt.Sprintf("dashgrp:%d", i), joinLeftRight(leftPart, delayStr, blInnerW)))
 	}
-	card3 := cardStyle.Width(halfW).Height(botCardInnerH).MaxHeight(botCardInnerH + 2).Render(strings.Join(blLines, "\n"))
+	card3 := cardStyle.Width(halfW).Height(botInnerH).MaxHeight(botInnerH + 2).Render(strings.Join(blLines, "\n"))
 
-	// Bottom-Right Card: Live Active Connections
+	// ── Bottom-Right Card: Live Active Connections
 	brInnerW := rightHalfW - 2
-	brCap := botCardInnerH - 2
+	brCap := botInnerH - 2
 	if brCap < 1 {
 		brCap = 1
 	}
@@ -1758,7 +1764,6 @@ func (m model) renderDashboard(totalW, paneInnerH int) string {
 	if len(m.conns) == 0 {
 		brLines = append(brLines, dimStyle.Render("(no active connections)"))
 	} else {
-		// Sort by total bytes descending so highest-traffic connections appear on top.
 		sorted := make([]api.ConnectionItem, len(m.conns))
 		copy(sorted, m.conns)
 		sort.SliceStable(sorted, func(i, j int) bool {
@@ -1785,15 +1790,14 @@ func (m model) renderDashboard(totalW, paneInnerH int) string {
 			brLines = append(brLines, joinLeftRight(leftPart, rightPart, brInnerW))
 		}
 	}
-	card4 := cardStyle.Width(rightHalfW).Height(botCardInnerH).MaxHeight(botCardInnerH + 2).Render(strings.Join(brLines, "\n"))
+	card4 := cardStyle.Width(rightHalfW).Height(botInnerH).MaxHeight(botInnerH + 2).Render(strings.Join(brLines, "\n"))
 
 	botRow := lipgloss.JoinHorizontal(lipgloss.Top, card3, " ", card4)
-
 	return lipgloss.JoinVertical(lipgloss.Left, topRow, botRow)
 }
 
 func kvLine(k, v string, maxW int) string {
-	label := kvKeyStyle.Render(fmt.Sprintf("%-14s", k+":"))
+	label := kvKeyStyle.Render(fmt.Sprintf("%-13s", k+":"))
 	avail := maxW - lipgloss.Width(label) - 1
 	if avail < 6 {
 		avail = 6
@@ -1801,13 +1805,19 @@ func kvLine(k, v string, maxW int) string {
 	return label + " " + ansi.Truncate(v, avail, "…")
 }
 
+// kvLineRaw renders a key-value row without truncating v (preserves bubblezone markers).
+func kvLineRaw(k, v string) string {
+	label := kvKeyStyle.Render(fmt.Sprintf("%-13s", k+":"))
+	return label + " " + v
+}
+
 func renderSparkline(samples []int64, width int) string {
 	bars := []rune("▁▂▃▄▅▆▇█")
 	if width < 8 {
 		width = 8
 	}
-	if width > 48 {
-		width = 48
+	if width > 44 {
+		width = 44
 	}
 	if len(samples) == 0 {
 		return strings.Repeat("▁", width)
