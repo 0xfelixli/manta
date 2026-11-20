@@ -38,11 +38,46 @@ type ConfigsResp struct {
 	} `json:"tun"`
 }
 
+// ConnectionItem represents a single active connection from GET /connections.
+type ConnectionItem struct {
+	ID       string   `json:"id"`
+	Upload   int64    `json:"upload"`
+	Download int64    `json:"download"`
+	Chains   []string `json:"chains"`
+	Rule     string   `json:"rule"`
+	Metadata struct {
+		Network         string `json:"network"`
+		Host            string `json:"host"`
+		DestinationIP   string `json:"destinationIP"`
+		DestinationPort string `json:"destinationPort"`
+	} `json:"metadata"`
+}
+
+// Target returns host:port (falling back to destinationIP:port).
+func (c ConnectionItem) Target() string {
+	host := c.Metadata.Host
+	if host == "" {
+		host = c.Metadata.DestinationIP
+	}
+	if c.Metadata.DestinationPort != "" {
+		return host + ":" + c.Metadata.DestinationPort
+	}
+	return host
+}
+
+// Outbound returns the final exit proxy/direct name for this connection.
+func (c ConnectionItem) Outbound() string {
+	if len(c.Chains) == 0 {
+		return "-"
+	}
+	return c.Chains[0]
+}
+
 // ConnectionsSummary summarizes GET /connections.
 type ConnectionsSummary struct {
-	UploadTotal   int64             `json:"uploadTotal"`
-	DownloadTotal int64             `json:"downloadTotal"`
-	Connections   []json.RawMessage `json:"connections"`
+	UploadTotal   int64            `json:"uploadTotal"`
+	DownloadTotal int64            `json:"downloadTotal"`
+	Connections   []ConnectionItem `json:"connections"`
 }
 
 // ExitIPInfo describes the current outbound IP and geo location through the proxy.

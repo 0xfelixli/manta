@@ -54,10 +54,16 @@ type stateLoadedMsg struct {
 	tunStack   string
 	proxies    map[string]api.ProxyInfo
 	sysProxyOn bool
-	connCount  int
+	conns      []api.ConnectionItem
 	totalUp    int64
 	totalDown  int64
 	err        error
+}
+
+type connsPollMsg struct {
+	conns     []api.ConnectionItem
+	totalUp   int64
+	totalDown int64
 }
 
 type exitIPLoadedMsg struct {
@@ -352,12 +358,12 @@ type model struct {
 	sysProxyOn bool
 	sortByFast bool
 
-	up         int64
-	down       int64
-	totalUp    int64
-	totalDown  int64
-	connCount  int
-	downHist   []int64
+	up        int64
+	down      int64
+	totalUp   int64
+	totalDown int64
+	conns     []api.ConnectionItem
+	downHist  []int64
 
 	exitIP     *api.ExitIPInfo
 	exitIPErr  string
@@ -442,7 +448,21 @@ func (m *model) setToast(kind toastKind, text string) {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(m.loadStateCmd(), m.fetchExitIPCmd(), m.startTrafficCmd(), m.spin.Tick)
+	return tea.Batch(m.loadStateCmd(), m.fetchExitIPCmd(), m.startTrafficCmd(), m.pollConnsTickCmd(), m.spin.Tick)
+}
+
+func (m model) pollConnsTickCmd() tea.Cmd {
+	return tea.Tick(2*time.Second, func(time.Time) tea.Msg {
+		conns, err := m.client.GetConnections()
+		if err != nil {
+			return connsPollMsg{}
+		}
+		return connsPollMsg{
+			conns:     conns.Connections,
+			totalUp:   conns.UploadTotal,
+			totalDown: conns.DownloadTotal,
+		}
+	})
 }
 
 func detectSysProxy() bool {
@@ -479,12 +499,12 @@ func (m model) loadStateCmd() tea.Cmd {
 		if err != nil {
 			return stateLoadedMsg{err: err}
 		}
-		var connCount int
+		var conns []api.ConnectionItem
 		var totalUp, totalDown int64
-		if conns, err := m.client.GetConnections(); err == nil {
-			connCount = len(conns.Connections)
-			totalUp = conns.UploadTotal
-			totalDown = conns.DownloadTotal
+		if summary, err := m.client.GetConnections(); err == nil {
+			conns = summary.Connections
+			totalUp = summary.UploadTotal
+			totalDown = summary.DownloadTotal
 		}
 		return stateLoadedMsg{
 			version:    ver.Version,
@@ -493,7 +513,7 @@ func (m model) loadStateCmd() tea.Cmd {
 			tunStack:   liveCfg.Tun.Stack,
 			proxies:    proxies,
 			sysProxyOn: detectSysProxy(),
-			connCount:  connCount,
+			conns:      conns,
 			totalUp:    totalUp,
 			totalDown:  totalDown,
 		}
@@ -678,6 +698,22 @@ func (m model) selectedGroup() (api.ProxyInfo, bool) {
 	return p, exists
 }
 
+func (m model) primarySelectorGroup() (api.ProxyInfo, bool) {
+	// Prefer the main proxy selector group (e.g. 🚀节点选择 / PROXY / Proxy) when on Dashboard.
+	if m.activeTab == tabDashboard {
+		for _, item := range m.groupList.Items() {
+			if g, ok := item.(groupItem); ok && g.kind == "Selector" {
+				if strings.Contains(g.name, "节点选择") || strings.EqualFold(g.name, "PROXY") || strings.EqualFold(g.name, "Proxy") {
+					if p, exists := m.proxies[g.name]; exists {
+						return p, true
+					}
+				}
+			}
+		}
+	}
+	return m.selectedGroup()
+}
+
 func (m model) resolveActiveExit() (groupName, chain string, delay int) {
 	if !m.online || len(m.proxies) == 0 {
 		return "", "(offline)", 0
@@ -691,7 +727,7 @@ func (m model) resolveActiveExit() (groupName, chain string, delay int) {
 			return "GLOBAL", m.traceChain("GLOBAL", g.Now), m.finalDelay(g.Now)
 		}
 	}
-	if g, ok := m.selectedGroup(); ok && g.Now != "" {
+	if g, ok := m.primarySelectorGroup(); ok && g.Now != "" {
 		return g.Name, m.traceChain(g.Name, g.Now), m.finalDelay(g.Now)
 	}
 	return "", "(none)", 0
@@ -820,7 +856,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tunOn = msg.tunOn
 		m.tunStack = msg.tunStack
 		m.sysProxyOn = msg.sysProxyOn
-		m.connCount = msg.connCount
+		m.conns = msg.conns
 		m.totalUp = msg.totalUp
 		m.totalDown = msg.totalDown
 		m.proxies = msg.proxies
@@ -898,6 +934,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		loc := strings.TrimSpace(strings.Join([]string{msg.info.Country, msg.info.City}, ", "))
 		m.setToast(toastSuccess, fmt.Sprintf("✓ Exit IP: %s (%s • %s)", msg.info.IP, loc, msg.info.ISP))
 		return m, nil
+
+	case connsPollMsg:
+		if msg.conns != nil {
+			m.conns = msg.conns
+			m.totalUp = msg.totalUp
+			m.totalDown = msg.totalDown
+		}
+		return m, m.pollConnsTickCmd()
 
 	case trafficStartedMsg:
 		return m, waitTrafficCmd(msg.ch)
@@ -1207,6 +1251,19 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.activeTab != tabProxies {
+		// Dashboard: clicking a group in the Groups Overview jumps directly to that group in Proxies tab.
+		for i, item := range m.groupList.Items() {
+			if zone.Get(fmt.Sprintf("dashgrp:%d", i)).InBounds(msg) {
+				m.groupList.Select(i)
+				m.rebuildNodeList(false)
+				m.activeTab = tabProxies
+				m.setFocus(paneNodes)
+				if g, ok := item.(groupItem); ok {
+					m.setToast(toastInfo, fmt.Sprintf("Jumped to %s (%d nodes)", g.name, g.count))
+				}
+				return m, nil
+			}
+		}
 		return m, nil
 	}
 
@@ -1371,21 +1428,25 @@ func (m model) View() string {
 }
 
 func (m model) renderDashboard(totalW, paneInnerH int) string {
-	// Two top cards side-by-side + one bottom traffic card filling paneInnerH+2 total lines.
+	// Compact 2x2 grid:
+	//   Top-Left:  System, Capture Mode & Traffic totals
+	//   Top-Right: Exit IP, Geolocation & Speed Sparkline
+	//   Bot-Left:  Proxy Groups Overview (clickable -> jumps to Proxies tab)
+	//   Bot-Right: Live Active Connections (auto-refreshed every 2s)
 	halfW := (totalW - 5) / 2
 	if halfW < 28 {
 		halfW = 28
 	}
 	rightHalfW := (totalW - 5) - halfW
 
-	topCardInnerH := 7
-	bottomCardInnerH := paneInnerH - topCardInnerH - 2
-	if bottomCardInnerH < 4 {
-		bottomCardInnerH = 4
+	topCardInnerH := 8
+	botCardInnerH := paneInnerH - topCardInnerH - 2
+	if botCardInnerH < 5 {
+		botCardInnerH = 5
 	}
 
-	// Card 1: Connection & Traffic Capture Mode
-	tunStatus := dimStyle.Render("○ OFF (run `sudo manta up --tun`)")
+	// Top-Left Card: System, Capture Mode & Traffic
+	tunStatus := dimStyle.Render("○ OFF (`sudo manta up --tun`)")
 	if m.tunOn {
 		stack := m.tunStack
 		if stack == "" {
@@ -1401,18 +1462,25 @@ func (m model) renderDashboard(totalW, paneInnerH int) string {
 	if profile == "" {
 		profile = "(default)"
 	}
+	trafficSummary := fmt.Sprintf(
+		"%s %s  %s %s",
+		speedUpStyle.Render("↑"+formatBytes(m.totalUp)),
+		dimStyle.Render("|"),
+		speedDownStyle.Render("↓"+formatBytes(m.totalDown)),
+		dimStyle.Render(fmt.Sprintf("(%d conns)", len(m.conns))),
+	)
 	c1Lines := []string{
 		cardTitleStyle.Render("System & Capture Mode"),
-		kvLine("Core", fmt.Sprintf("mihomo %s", m.version), halfW-2),
-		kvLine("Profile", profile, halfW-2),
+		kvLine("Core", fmt.Sprintf("mihomo %s (%s)", m.version, profile), halfW-2),
 		kvLine("Routing Mode", strings.ToUpper(m.mode), halfW-2),
 		kvLine("TUN Mode", tunStatus, halfW-2),
 		kvLine("SysProxy", sysStatus, halfW-2),
 		kvLine("Local Inbound", fmt.Sprintf("127.0.0.1:%d (HTTP/SOCKS5)", m.cfg.MixedPort), halfW-2),
+		kvLine("Total Traffic", trafficSummary, halfW-2),
 	}
 	card1 := cardStyle.Width(halfW).Height(topCardInnerH).MaxHeight(topCardInnerH + 2).Render(strings.Join(c1Lines, "\n"))
 
-	// Card 2: Exit IP & Geolocation
+	// Top-Right Card: Exit IP, Geolocation & Speed Sparkline
 	_, chain, exitDelay := m.resolveActiveExit()
 	ipVal := dimStyle.Render("Checking...")
 	locVal := dimStyle.Render("-")
@@ -1435,44 +1503,100 @@ func (m model) renderDashboard(totalW, paneInnerH int) string {
 		ipVal = delayBadStyle.Render("Lookup failed")
 		locVal = dimStyle.Render(m.exitIPErr)
 	}
-	delayStr := formatDelayStyled(exitDelay)
+	spark := renderSparkline(m.downHist, rightHalfW-18)
 	c2Lines := []string{
 		cardTitleStyle.Render("Exit IP & Geolocation"),
 		kvLine("Exit IP", ipVal, rightHalfW-2),
 		kvLine("Location", locVal, rightHalfW-2),
 		kvLine("ISP", ispVal, rightHalfW-2),
 		kvLine("Active Chain", chain, rightHalfW-2),
-		kvLine("Exit Latency", delayStr, rightHalfW-2),
+		kvLine("Exit Latency", formatDelayStyled(exitDelay), rightHalfW-2),
+		kvLine("Down Speed", speedDownStyle.Render(spark), rightHalfW-2),
 	}
 	card2 := cardStyle.Width(rightHalfW).Height(topCardInnerH).MaxHeight(topCardInnerH + 2).Render(strings.Join(c2Lines, "\n"))
 
 	topRow := lipgloss.JoinHorizontal(lipgloss.Top, card1, " ", card2)
 
-	// Card 3: Live Speed, Sparkline & Connections
-	fullW := totalW - 2
-	spark := renderSparkline(m.downHist, fullW-18)
-	c3Lines := []string{
-		cardTitleStyle.Render("Live Traffic & Connections"),
-		fmt.Sprintf(
-			"%s %s    %s %s    %s %s",
-			kvKeyStyle.Render("Upload:"), speedUpStyle.Render("↑ "+formatSpeed(m.up)),
-			kvKeyStyle.Render("Download:"), speedDownStyle.Render("↓ "+formatSpeed(m.down)),
-			kvKeyStyle.Render("Active Conns:"), kvValStyle.Render(fmt.Sprintf("%d", m.connCount)),
-		),
-		fmt.Sprintf(
-			"%s %s    %s %s",
-			kvKeyStyle.Render("Total Up:"), rowTextStyle.Render(formatBytes(m.totalUp)),
-			kvKeyStyle.Render("Total Down:"), rowTextStyle.Render(formatBytes(m.totalDown)),
-		),
-		fmt.Sprintf("%s %s", kvKeyStyle.Render("Down History:"), speedDownStyle.Render(spark)),
+	// Bottom-Left Card: Clickable Proxy Groups Overview
+	blInnerW := halfW - 2
+	blCap := botCardInnerH - 2
+	if blCap < 1 {
+		blCap = 1
 	}
-	card3 := cardStyle.Width(fullW).Height(bottomCardInnerH).MaxHeight(bottomCardInnerH + 2).Render(strings.Join(c3Lines, "\n"))
+	blLines := []string{
+		joinLeftRight(cardTitleStyle.Render("Proxy Groups (click to open)"), dimStyle.Render(fmt.Sprintf("%d groups", len(m.groupList.Items()))), blInnerW),
+		dimStyle.Render(strings.Repeat("─", blInnerW)),
+	}
+	allGroups := m.groupList.Items()
+	for i, item := range allGroups {
+		if i >= blCap {
+			break
+		}
+		g, ok := item.(groupItem)
+		if !ok {
+			continue
+		}
+		d := m.finalDelay(g.now)
+		delayStr := formatDelayStyled(d)
+		nowMax := blInnerW - 22 - lipgloss.Width(delayStr)
+		if nowMax < 8 {
+			nowMax = 8
+		}
+		leftPart := rowTextStyle.Render(ansi.Truncate(g.name, 16, "…")) + dimStyle.Render(" → ") + exitLabelStyle.Render(ansi.Truncate(g.now, nowMax, "…"))
+		row := joinLeftRight(leftPart, delayStr, blInnerW)
+		blLines = append(blLines, zone.Mark(fmt.Sprintf("dashgrp:%d", i), row))
+	}
+	card3 := cardStyle.Width(halfW).Height(botCardInnerH).MaxHeight(botCardInnerH + 2).Render(strings.Join(blLines, "\n"))
 
-	return lipgloss.JoinVertical(lipgloss.Left, topRow, card3)
+	// Bottom-Right Card: Live Active Connections
+	brInnerW := rightHalfW - 2
+	brCap := botCardInnerH - 2
+	if brCap < 1 {
+		brCap = 1
+	}
+	brLines := []string{
+		joinLeftRight(cardTitleStyle.Render("Live Connections"), dimStyle.Render(fmt.Sprintf("%d active", len(m.conns))), brInnerW),
+		dimStyle.Render(strings.Repeat("─", brInnerW)),
+	}
+	if len(m.conns) == 0 {
+		brLines = append(brLines, dimStyle.Render("(no active connections)"))
+	} else {
+		// Sort by total bytes descending so highest-traffic connections appear on top.
+		sorted := make([]api.ConnectionItem, len(m.conns))
+		copy(sorted, m.conns)
+		sort.SliceStable(sorted, func(i, j int) bool {
+			return (sorted[i].Download + sorted[i].Upload) > (sorted[j].Download + sorted[j].Upload)
+		})
+		for i, c := range sorted {
+			if i >= brCap {
+				break
+			}
+			traffic := formatBytes(c.Download + c.Upload)
+			out := c.Outbound()
+			outStyled := exitLabelStyle.Render(ansi.Truncate(out, 16, "…"))
+			if strings.EqualFold(out, "DIRECT") {
+				outStyled = activeMarkStyle.Render("DIRECT")
+			} else if strings.EqualFold(out, "REJECT") {
+				outStyled = delayBadStyle.Render("REJECT")
+			}
+			rightPart := outStyled + " " + dimStyle.Render(fmt.Sprintf("%7s", traffic))
+			targetMax := brInnerW - lipgloss.Width(rightPart) - 2
+			if targetMax < 10 {
+				targetMax = 10
+			}
+			leftPart := rowTextStyle.Render(ansi.Truncate(c.Target(), targetMax, "…"))
+			brLines = append(brLines, joinLeftRight(leftPart, rightPart, brInnerW))
+		}
+	}
+	card4 := cardStyle.Width(rightHalfW).Height(botCardInnerH).MaxHeight(botCardInnerH + 2).Render(strings.Join(brLines, "\n"))
+
+	botRow := lipgloss.JoinHorizontal(lipgloss.Top, card3, " ", card4)
+
+	return lipgloss.JoinVertical(lipgloss.Left, topRow, botRow)
 }
 
 func kvLine(k, v string, maxW int) string {
-	label := kvKeyStyle.Render(fmt.Sprintf("%-13s", k+":"))
+	label := kvKeyStyle.Render(fmt.Sprintf("%-14s", k+":"))
 	avail := maxW - lipgloss.Width(label) - 1
 	if avail < 6 {
 		avail = 6
