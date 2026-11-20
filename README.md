@@ -34,7 +34,7 @@ go install github.com/0xfelixli/manta/cmd/manta@latest
 ```bash
 brew install go
 go mod tidy
-CGO_ENABLED=1 go build -o manta ./cmd/manta
+CGO_ENABLED=1 go build -tags with_gvisor -o manta ./cmd/manta
 mkdir -p ~/.local/bin && rm -f ~/.local/bin/manta && cp manta ~/.local/bin/manta
 ```
 

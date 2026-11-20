@@ -274,8 +274,19 @@ func (c *Client) SetMode(mode string) error {
 
 // SetTun hot-toggles mihomo's TUN virtual interface (requires root-started mihomo).
 func (c *Client) SetTun(enable bool) error {
+	if enable {
+		return c.doJSON(http.MethodPatch, "/configs", map[string]any{
+			"tun": map[string]any{
+				"enable":                true,
+				"stack":                 "mixed",
+				"auto-route":            true,
+				"auto-detect-interface": true,
+				"dns-hijack":            []string{"any:53", "tcp://any:53"},
+			},
+		}, nil)
+	}
 	return c.doJSON(http.MethodPatch, "/configs", map[string]any{
-		"tun": map[string]any{"enable": enable},
+		"tun": map[string]any{"enable": false},
 	}, nil)
 }
 

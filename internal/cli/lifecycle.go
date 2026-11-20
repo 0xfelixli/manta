@@ -85,7 +85,7 @@ var upCmd = &cobra.Command{
 	Use:   "up",
 	Short: "Start the mihomo proxy daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		_, cfg, mgr, _, err := loadContext()
+		paths, cfg, mgr, client, err := loadContext()
 		if err != nil {
 			return err
 		}
@@ -97,6 +97,14 @@ var upCmd = &cobra.Command{
 		} else {
 			cfg.TunEnabled = false
 		}
+		_ = config.Save(paths, cfg)
+
+		// If a daemon is already running and the user ran `sudo manta up --tun`,
+		// automatically stop the old daemon so the new root TUN daemon can take over cleanly.
+		if running, _ := mgr.IsRunning(); running && upWithTun {
+			_ = mgr.Stop()
+		}
+
 		pid, err := mgr.Start()
 		if err != nil {
 			return err
@@ -104,7 +112,11 @@ var upCmd = &cobra.Command{
 		fmt.Printf("manta is up (pid %d)\n", pid)
 		fmt.Printf("HTTP / SOCKS5 proxy: 127.0.0.1:%d\n", cfg.MixedPort)
 		if cfg.TunEnabled {
-			fmt.Println("TUN mode:            enabled (all system & terminal traffic captured)")
+			if live, err := client.GetConfigs(); err == nil && !live.Tun.Enable {
+				fmt.Println("Warning: TUN failed to initialize; check `manta logs`")
+			} else {
+				fmt.Println("TUN mode:            enabled (all system & terminal traffic captured)")
+			}
 		} else if upWithSysProxy {
 			if services, err := sysproxy.ResolveServices(""); err == nil {
 				if err := sysproxy.Enable("127.0.0.1", cfg.MixedPort, services); err == nil {
