@@ -15,6 +15,10 @@ var rootCmd = &cobra.Command{
 	SilenceErrors: true,
 }
 
+func init() {
+	rootCmd.CompletionOptions.DisableDefaultCmd = true
+}
+
 // Execute runs the root CLI command.
 func Execute() error {
 	return rootCmd.Execute()
