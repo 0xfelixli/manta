@@ -368,6 +368,11 @@ func BuildRuntimeConfig(p Paths, cfg *AppConfig) error {
 			"auto-route":            true,
 			"auto-detect-interface": true,
 			"dns-hijack":            []string{"any:53", "tcp://any:53"},
+			"route-exclude-address": []string{
+				"100.64.0.0/10",
+				"192.168.1.0/24",
+				"fd7a:115c:a1e0::/48",
+			},
 		}
 		dnsMap, ok := doc["dns"].(map[string]any)
 		if !ok || dnsMap == nil {
@@ -398,7 +403,16 @@ func BuildRuntimeConfig(p Paths, cfg *AppConfig) error {
 				"ntp.*.com",
 				"stun.*.*",
 				"stun.*.*.*",
+				"+.tailscale.com",
+				"+.tailscale.io",
+				"+.ts.net",
 			}
+		} else {
+			dnsMap["fake-ip-filter"] = mergeFakeIPFilter(dnsMap["fake-ip-filter"],
+				"+.tailscale.com",
+				"+.tailscale.io",
+				"+.ts.net",
+			)
 		}
 		if _, exists := dnsMap["default-nameserver"]; !exists {
 			dnsMap["default-nameserver"] = []string{"223.5.5.5", "119.29.29.29"}
@@ -463,4 +477,33 @@ func hasProcessRules(rulesAny any) bool {
 		}
 	}
 	return false
+}
+
+func mergeFakeIPFilter(existing any, additions ...string) []string {
+	var out []string
+	seen := make(map[string]bool)
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	switch v := existing.(type) {
+	case []any:
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				add(s)
+			}
+		}
+	case []string:
+		for _, s := range v {
+			add(s)
+		}
+	}
+	for _, s := range additions {
+		add(s)
+	}
+	return out
 }
