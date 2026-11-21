@@ -33,7 +33,7 @@ const (
 	burstSpeedFloor   = 32 * 1024
 )
 
-func mantaPointInBody(fx, fy float64) bool {
+func mantaPointInBody(fx, fy, wingScale float64) bool {
 	const cx = 11.0
 	dx := math.Abs(fx - cx)
 
@@ -46,11 +46,11 @@ func mantaPointInBody(fx, fy float64) bool {
 	case fy > 5.2 && fy <= 11.2:
 		t := (fy - 5.2) / 6.0
 		curve := math.Pow(t, 0.88)
-		maxW := 3.1 + curve*7.4
+		maxW := 3.1 + curve*(7.4*wingScale)
 		return dx <= maxW
 	case fy > 11.2 && fy <= 15.4:
 		t := (fy - 11.2) / 4.2
-		maxW := 10.5 * math.Pow(1.0-t, 1.25)
+		maxW := (10.5 * wingScale) * math.Pow(1.0-t, 1.25)
 		if maxW < 0.75 {
 			maxW = 0.75
 		}
@@ -63,7 +63,7 @@ func mantaPointInBody(fx, fy float64) bool {
 	return false
 }
 
-func mantaTemplateIconPNG() []byte {
+func mantaFrameIconPNG(wingScale float64) []byte {
 	const size = 44
 	const samples = 4
 	img := image.NewNRGBA(image.Rect(0, 0, size, size))
@@ -75,7 +75,7 @@ func mantaTemplateIconPNG() []byte {
 				for sx := 0; sx < samples; sx++ {
 					fx := (float64(x) + (float64(sx)+0.5)/float64(samples)) * (22.0 / float64(size))
 					fy := (float64(y) + (float64(sy)+0.5)/float64(samples)) * (22.0 / float64(size))
-					if mantaPointInBody(fx, fy) {
+					if mantaPointInBody(fx, fy, wingScale) {
 						hits++
 					}
 				}
@@ -90,6 +90,10 @@ func mantaTemplateIconPNG() []byte {
 	var buf bytes.Buffer
 	_ = png.Encode(&buf, img)
 	return buf.Bytes()
+}
+
+func mantaTemplateIconPNG() []byte {
+	return mantaFrameIconPNG(1.0)
 }
 
 func statusDotPNG(r, g, b uint8) []byte {
@@ -139,11 +143,31 @@ func Run(cfg *config.AppConfig, mgr *core.Manager, client *api.Client) error {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	onReady := func() {
-		if icon := mantaTemplateIconPNG(); len(icon) > 0 {
-			systray.SetTemplateIcon(icon, icon)
+		iconFrames := [][]byte{
+			mantaFrameIconPNG(1.00), // Neutral glide
+			mantaFrameIconPNG(1.10), // Wide wingspan
+			mantaFrameIconPNG(1.00), // Neutral glide
+			mantaFrameIconPNG(0.76), // Swept wing stroke
+		}
+		if len(iconFrames[0]) > 0 {
+			systray.SetTemplateIcon(iconFrames[0], iconFrames[0])
 		}
 		systray.SetTitle("")
 		systray.SetTooltip("Manta")
+
+		flapWings := func(cycles int) {
+			for c := 0; c < cycles; c++ {
+				for _, f := range iconFrames {
+					if len(f) > 0 {
+						systray.SetTemplateIcon(f, f)
+					}
+					time.Sleep(120 * time.Millisecond)
+				}
+			}
+			if len(iconFrames[0]) > 0 {
+				systray.SetTemplateIcon(iconFrames[0], iconFrames[0])
+			}
+		}
 
 		dotOnline := statusDotPNG(16, 185, 129) // Emerald (#10B981)
 		dotBusy := statusDotPNG(245, 158, 11)   // Amber (#F59E0B)
@@ -699,6 +723,7 @@ func Run(cfg *config.AppConfig, mgr *core.Manager, client *api.Client) error {
 				case <-mBestNode.ClickedCh:
 					go func() {
 						mBestNode.SetTitle("⏳ Testing...")
+						go flapWings(6)
 						proxies, err := client.GetProxies()
 						if err != nil {
 							mBestNode.SetTitle("⚡ Auto-Select Fastest")

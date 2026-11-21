@@ -30,6 +30,7 @@ const (
 	tabDashboard tabView = iota
 	tabProxies
 	tabSettings
+	tabSonar
 )
 
 type pane int
@@ -107,6 +108,8 @@ type delayResultMsg struct {
 type toastExpireMsg struct {
 	seq int
 }
+
+type sonarTickMsg struct{}
 
 type powerOffDoneMsg struct{}
 
@@ -437,6 +440,10 @@ type model struct {
 	toastText string
 	toastType toastKind
 	toastSeq  int
+
+	sonarFrame   int
+	prevTab      tabView
+	milestone1GB bool
 }
 
 func newStyledList(title string, delegate list.ItemDelegate) list.Model {
@@ -1130,6 +1137,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case sonarTickMsg:
+		if m.activeTab != tabSonar {
+			return m, nil
+		}
+		m.sonarFrame++
+		return m, sonarTickCmd()
+
 	case powerOffDoneMsg:
 		m.cancel()
 		return m, tea.Quit
@@ -1274,6 +1288,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.downHist) > 32 {
 			m.downHist = m.downHist[len(m.downHist)-32:]
 		}
+		if !m.milestone1GB && m.totalDown >= 1<<30 && m.toastType == toastNone {
+			m.milestone1GB = true
+			return m, tea.Batch(waitTrafficCmd(msg.ch), m.setToast(toastSuccess, "🌊 Deep-Sea Milestone: 1.0 GB glided through the Mariana Trench!"))
+		}
 		return m, waitTrafficCmd(msg.ch)
 
 	case actionResultMsg:
@@ -1325,6 +1343,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.setToast(toastError, fmt.Sprintf("✗ %s: timeout", msg.label))
 		}
 		if bestName != "" {
+			if bestMs <= 35 {
+				return m, m.setToast(toastSuccess, fmt.Sprintf("🌊 Sonic Current! %d/%d alive • %s (%dms)", okCount, len(msg.results), bestName, bestMs))
+			}
 			return m, m.setToast(toastSuccess, fmt.Sprintf("✓ %d/%d alive (sorted) • Fastest: %s (%dms)", okCount, len(msg.results), bestName, bestMs))
 		}
 		return m, m.setToast(toastWarn, fmt.Sprintf("⚠ All %d nodes timed out", len(msg.results)))
@@ -1345,6 +1366,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c":
 			m.cancel()
 			return m, tea.Quit
+
+		case "~", "`":
+			if m.activeTab == tabSonar {
+				m.activeTab = m.prevTab
+				return m, tea.ClearScreen
+			}
+			m.prevTab = m.activeTab
+			m.activeTab = tabSonar
+			return m, tea.Batch(tea.ClearScreen, sonarTickCmd(), m.setToast(toastInfo, "🌊 Deep Ocean Sonar Mode — press ~ or any tab (1/2/3) to surface"))
+
+		case "esc":
+			if m.activeTab == tabSonar {
+				m.activeTab = m.prevTab
+				return m, tea.ClearScreen
+			}
 
 		case "Q":
 			m.busy = true
@@ -1507,6 +1543,14 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 	// Global top nav tabs & Power Off button
 	switch {
+	case zone.Get("btn:sonar").InBounds(msg):
+		if m.activeTab == tabSonar {
+			m.activeTab = m.prevTab
+			return m, tea.ClearScreen
+		}
+		m.prevTab = m.activeTab
+		m.activeTab = tabSonar
+		return m, tea.Batch(tea.ClearScreen, sonarTickCmd(), m.setToast(toastInfo, "🌊 Deep Ocean Sonar Mode — click MANTA or press ~ to surface"))
 	case zone.Get("tab:dashboard").InBounds(msg):
 		m.activeTab = tabDashboard
 		m.savePrefs()
@@ -1761,7 +1805,7 @@ func (m model) View() string {
 	}
 	leftNav := fmt.Sprintf(
 		"%s   %s  %s  %s",
-		badgeStyle.Render("MANTA"),
+		zone.Mark("btn:sonar", badgeStyle.Render("MANTA")),
 		zone.Mark("tab:dashboard", dashTab),
 		zone.Mark("tab:proxies", proxTab),
 		zone.Mark("tab:settings", settTab),
@@ -1791,6 +1835,8 @@ func (m model) View() string {
 		body = m.renderProxies(w, leftBoxW, rightBoxW, bodyH)
 	case tabSettings:
 		body = m.renderSettings(w, bodyH)
+	case tabSonar:
+		body = m.renderSonar(w, bodyH)
 	}
 
 	// Single smart footer row: transient colored Toast OR contextual key hints
@@ -1828,8 +1874,111 @@ func (m model) renderFooter(w int) string {
 		hints = "1/2/3: Tabs  •  Click/Enter: Switch Node  •  /: Search  •  o: Sort Speed  •  t/T: Test  •  q: Close UI  •  Q: Power Off All"
 	case tabSettings:
 		hints = "1/2/3: Tabs  •  Click any setting to toggle & auto-save  •  q: Close UI  •  Q: Power Off All"
+	case tabSonar:
+		hints = "🌊 Deep Ocean Sonar  •  ~/Esc/1/2/3: Surface to Dashboard  •  i: Ping Sonar Beacon  •  q: Close UI"
 	}
 	return dimStyle.Render(ansi.Truncate(hints, w, "…"))
+}
+
+func sonarTickCmd() tea.Cmd {
+	return tea.Tick(380*time.Millisecond, func(time.Time) tea.Msg {
+		return sonarTickMsg{}
+	})
+}
+
+var sonarQuotes = []string{
+	"\"Packets glide silently beneath the firewall, where only the manta swims.\"",
+	"\"In the Mariana Trench (-7,890m), every handshake is zero-loss.\"",
+	"\"No borders exist below the thermocline — only pure TCP/UDP flow.\"",
+	"\"Ride the Kuroshio Current: low latency, wide wingspan, zero turbulence.\"",
+}
+
+func (m model) renderSonar(totalW, bodyH int) string {
+	innerW := totalW - 4
+	if innerW < 40 {
+		innerW = 40
+	}
+	innerH := bodyH - 2
+	if innerH < 12 {
+		innerH = 12
+	}
+
+	frameA := []string{
+		"         ·  ˚  .   🫧   .   ˚  ·     ~  ~  ~",
+		"             ╭◜◝ ͡ ◜◝╮    ╭◜◝ ͡ ◜◝╮",
+		"          ╱￣￣╲  ╰◟◞ ͜ ◟◞╯  ╱￣￣╲",
+		"       ╱￣      ╲___╭──╮___╱      ￣╲",
+		"    ╭─╯   ●         │  │         ●   ╰─╮",
+		"     ╲___          ╭╯  ╰╮          ___╱",
+		"         ￣￣╲____╱      ╲____╱￣￣",
+		"                 │   │   │",
+		"                  ╲  │  ╱",
+		"                   ╲ │ ╱",
+		"                    ╲│╱",
+	}
+	frameB := []string{
+		"      ~  ~  ~   ·  ˚  .   🫧   .   ˚  ·",
+		"             ╭◜◝ ͡ ◜◝╮    ╭◜◝ ͡ ◜◝╮",
+		"            ╱￣╲  ╰◟◞ ͜ ◟◞╯  ╱￣╲",
+		"         ╱￣    ╲___╭──╮___╱    ￣╲",
+		"      ╭─╯  ●        │  │        ●  ╰─╮",
+		"       ╲___        ╭╯  ╰╮        ___╱",
+		"           ￣￣╲__╱      ╲__╱￣￣",
+		"                 │   │   │",
+		"                  ╲  │  ╱",
+		"                   ╲ │ ╱",
+		"                    ▼",
+	}
+
+	art := frameA
+	if m.sonarFrame%2 == 1 {
+		art = frameB
+	}
+	drift := (m.sonarFrame % 7) - 3
+	if drift < 0 {
+		drift = -drift
+	}
+	padLeft := (innerW - 46) / 2
+	if padLeft < 2 {
+		padLeft = 2
+	}
+	padStr := strings.Repeat(" ", padLeft+drift)
+
+	depth := fmt.Sprintf("-%dm (Mariana Trench • utun %s)", m.cfg.MixedPort, m.tunStack)
+	if !m.tunOn {
+		depth = fmt.Sprintf("-%dm (Continental Shelf • %s)", m.cfg.MixedPort, strings.ToUpper(m.mode))
+	}
+	beacon := "Scanning abyssal beacons..."
+	if m.exitIP != nil {
+		beacon = fmt.Sprintf("%s (%s, %s • %s)", m.exitIP.IP, m.exitIP.Country, m.exitIP.City, m.exitIP.ISP)
+	}
+	_, chain, exitDelay := m.resolveActiveExit()
+	if exitDelay > 0 {
+		chain = fmt.Sprintf("%s (%dms sonar ping)", chain, exitDelay)
+	}
+	knots := float64(m.down+m.up) / (128 * 1024.0)
+	velocity := fmt.Sprintf("%.1f Knots  (↓ %s  ↑ %s  •  %d active streams)", knots, formatSpeed(m.down), formatSpeed(m.up), m.connsCount)
+	quote := sonarQuotes[(m.sonarFrame/12)%len(sonarQuotes)]
+
+	lines := []string{
+		joinLeftRight(cardTitleStyle.Render("🌊 Deep Ocean Sonar // Manta Glider"), dimStyle.Render("Easter Egg • ~ to exit"), innerW),
+		dimStyle.Render(strings.Repeat("─", innerW)),
+	}
+	for _, a := range art {
+		lines = append(lines, speedUpStyle.Render(ansi.Truncate(padStr+a, innerW, "")))
+	}
+	lines = append(lines,
+		dimStyle.Render(strings.Repeat("─", innerW)),
+		kvLine("Depth", kvValStyle.Render(depth), innerW),
+		kvLine("Sonar Beacon", kvValStyle.Render(beacon), innerW),
+		kvLine("Ocean Current", exitLabelStyle.Render(chain), innerW),
+		kvLine("Glide Speed", speedDownStyle.Render(velocity), innerW),
+		dimStyle.Render(ansi.Truncate("  "+quote, innerW, "…")),
+	)
+	if len(lines) > innerH {
+		lines = lines[:innerH]
+	}
+	return cardStyle.Width(totalW).Height(innerH).MaxHeight(innerH + 2).Render(strings.Join(lines, "\n"))
 }
 
 func (m model) renderSettings(totalW, bodyH int) string {
