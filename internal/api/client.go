@@ -362,11 +362,6 @@ func (c *Client) SetTun(enable bool) error {
 				"auto-route":            true,
 				"auto-detect-interface": true,
 				"dns-hijack":            []string{"any:53", "tcp://any:53"},
-				"route-exclude-address": []string{
-					"100.64.0.0/10",
-					"192.168.1.0/24",
-					"fd7a:115c:a1e0::/48",
-				},
 			},
 		}, nil)
 	}

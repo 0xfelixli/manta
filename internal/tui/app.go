@@ -30,7 +30,6 @@ const (
 	tabDashboard tabView = iota
 	tabProxies
 	tabSettings
-	tabSonar
 )
 
 type pane int
@@ -109,9 +108,9 @@ type toastExpireMsg struct {
 	seq int
 }
 
-type sonarTickMsg struct{}
-
 type powerOffDoneMsg struct{}
+
+type diveTickMsg struct{}
 
 // Oceanic Mineral design system — adaptive for both light (white) and dark terminals.
 // 80% calm mineral neutrals (Zinc), 15% oceanic teal/blue focus, 5% restrained semantic accents.
@@ -441,9 +440,8 @@ type model struct {
 	toastType toastKind
 	toastSeq  int
 
-	sonarFrame   int
-	prevTab      tabView
-	milestone1GB bool
+	diveMode  bool
+	diveFrame int
 }
 
 func newStyledList(title string, delegate list.ItemDelegate) list.Model {
@@ -1137,16 +1135,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case sonarTickMsg:
-		if m.activeTab != tabSonar {
-			return m, nil
-		}
-		m.sonarFrame++
-		return m, sonarTickCmd()
-
 	case powerOffDoneMsg:
 		m.cancel()
 		return m, tea.Quit
+
+	case diveTickMsg:
+		if !m.diveMode {
+			return m, nil
+		}
+		m.diveFrame++
+		return m, tea.Tick(180*time.Millisecond, func(time.Time) tea.Msg { return diveTickMsg{} })
 
 	case stateLoadedMsg:
 		m.busy = false
@@ -1288,10 +1286,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.downHist) > 32 {
 			m.downHist = m.downHist[len(m.downHist)-32:]
 		}
-		if !m.milestone1GB && m.totalDown >= 1<<30 && m.toastType == toastNone {
-			m.milestone1GB = true
-			return m, tea.Batch(waitTrafficCmd(msg.ch), m.setToast(toastSuccess, "🌊 Deep-Sea Milestone: 1.0 GB glided through the Mariana Trench!"))
-		}
 		return m, waitTrafficCmd(msg.ch)
 
 	case actionResultMsg:
@@ -1343,8 +1337,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.setToast(toastError, fmt.Sprintf("✗ %s: timeout", msg.label))
 		}
 		if bestName != "" {
-			if bestMs <= 35 {
-				return m, m.setToast(toastSuccess, fmt.Sprintf("🌊 Sonic Current! %d/%d alive • %s (%dms)", okCount, len(msg.results), bestName, bestMs))
+			if bestMs < 40 {
+				return m, m.setToast(toastSuccess, fmt.Sprintf("🌊 Sonic Current! %d/%d alive • Fastest: %s (%dms)", okCount, len(msg.results), bestName, bestMs))
 			}
 			return m, m.setToast(toastSuccess, fmt.Sprintf("✓ %d/%d alive (sorted) • Fastest: %s (%dms)", okCount, len(msg.results), bestName, bestMs))
 		}
@@ -1354,6 +1348,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
+		if m.diveMode {
+			if msg.String() == "ctrl+c" || msg.String() == "q" {
+				m.cancel()
+				return m, tea.Quit
+			}
+			m.diveMode = false
+			return m, tea.ClearScreen
+		}
 		if m.isFiltering() {
 			if msg.String() == "ctrl+c" {
 				m.cancel()
@@ -1363,24 +1365,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch msg.String() {
+		case "~":
+			m.diveMode = true
+			m.diveFrame = 0
+			return m, tea.Batch(tea.ClearScreen, tea.Tick(180*time.Millisecond, func(time.Time) tea.Msg { return diveTickMsg{} }))
+
 		case "q", "ctrl+c":
 			m.cancel()
 			return m, tea.Quit
-
-		case "~", "`":
-			if m.activeTab == tabSonar {
-				m.activeTab = m.prevTab
-				return m, tea.ClearScreen
-			}
-			m.prevTab = m.activeTab
-			m.activeTab = tabSonar
-			return m, tea.Batch(tea.ClearScreen, sonarTickCmd(), m.setToast(toastInfo, "🌊 Deep Ocean Sonar Mode — press ~ or any tab (1/2/3) to surface"))
-
-		case "esc":
-			if m.activeTab == tabSonar {
-				m.activeTab = m.prevTab
-				return m, tea.ClearScreen
-			}
 
 		case "Q":
 			m.busy = true
@@ -1543,14 +1535,13 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 	// Global top nav tabs & Power Off button
 	switch {
-	case zone.Get("btn:sonar").InBounds(msg):
-		if m.activeTab == tabSonar {
-			m.activeTab = m.prevTab
-			return m, tea.ClearScreen
+	case zone.Get("btn:dive").InBounds(msg):
+		m.diveMode = !m.diveMode
+		m.diveFrame = 0
+		if m.diveMode {
+			return m, tea.Batch(tea.ClearScreen, tea.Tick(180*time.Millisecond, func(time.Time) tea.Msg { return diveTickMsg{} }))
 		}
-		m.prevTab = m.activeTab
-		m.activeTab = tabSonar
-		return m, tea.Batch(tea.ClearScreen, sonarTickCmd(), m.setToast(toastInfo, "🌊 Deep Ocean Sonar Mode — click MANTA or press ~ to surface"))
+		return m, tea.ClearScreen
 	case zone.Get("tab:dashboard").InBounds(msg):
 		m.activeTab = tabDashboard
 		m.savePrefs()
@@ -1805,7 +1796,7 @@ func (m model) View() string {
 	}
 	leftNav := fmt.Sprintf(
 		"%s   %s  %s  %s",
-		zone.Mark("btn:sonar", badgeStyle.Render("MANTA")),
+		zone.Mark("btn:dive", badgeStyle.Render("MANTA")),
 		zone.Mark("tab:dashboard", dashTab),
 		zone.Mark("tab:proxies", proxTab),
 		zone.Mark("tab:settings", settTab),
@@ -1828,21 +1819,139 @@ func (m model) View() string {
 
 	// Main workspace
 	var body string
-	switch m.activeTab {
-	case tabDashboard:
-		body = m.renderDashboard(w, bodyH)
-	case tabProxies:
-		body = m.renderProxies(w, leftBoxW, rightBoxW, bodyH)
-	case tabSettings:
-		body = m.renderSettings(w, bodyH)
-	case tabSonar:
-		body = m.renderSonar(w, bodyH)
+	if m.diveMode {
+		body = m.renderDiveScreen(w, bodyH)
+	} else {
+		switch m.activeTab {
+		case tabDashboard:
+			body = m.renderDashboard(w, bodyH)
+		case tabProxies:
+			body = m.renderProxies(w, leftBoxW, rightBoxW, bodyH)
+		case tabSettings:
+			body = m.renderSettings(w, bodyH)
+		}
 	}
 
 	// Single smart footer row: transient colored Toast OR contextual key hints
 	footer := m.renderFooter(w)
 
 	return zone.Scan(lipgloss.JoinVertical(lipgloss.Left, header, divider, body, footer))
+}
+
+func (m model) renderDiveScreen(totalW, bodyH int) string {
+	frames := [][]string{
+		{
+			"         __                 __         ",
+			"        /  \\               /  \\        ",
+			"       / /\\ \\    .---.    / /\\ \\       ",
+			"      / /  \\ \\__/ o o \\__/ /  \\ \\      ",
+			"     /_/    \\___   ▽   ___/    \\_\\     ",
+			"                \\     /                ",
+			"                 \\   /                 ",
+			"                  | |                  ",
+			"                  ':'                  ",
+		},
+		{
+			"                                       ",
+			"       ____                 ____       ",
+			"     _/    \\     .---.     /    \\_     ",
+			"    /  .--. \\___/ o o \\___/ .--.  \\    ",
+			"    \\_/    \\____   ▽   ____/    \\_/    ",
+			"                \\     /                ",
+			"                 \\   /                 ",
+			"                  | |                  ",
+			"                  ':'                  ",
+		},
+		{
+			"                                       ",
+			"                                       ",
+			"        ____     .---.     ____        ",
+			"       /    \\___/ o o \\___/    \\       ",
+			"      / .--. ___   ▽   ___ .--. \\      ",
+			"      \\ \\   /   \\     /   \\   / /      ",
+			"       \\_\\_/     \\   /     \\_/_/       ",
+			"                  | |                  ",
+			"                  ':'                  ",
+		},
+	}
+
+	speed := m.down + m.up
+	step := m.diveFrame
+	if speed >= 512*1024 {
+		step = m.diveFrame * 2
+	}
+	art := frames[(step/2)%len(frames)]
+
+	innerW := totalW - 4
+	if innerW < 44 {
+		innerW = 44
+	}
+	innerH := bodyH - 2
+	if innerH < 12 {
+		innerH = 12
+	}
+
+	// Build animated ocean current lines with deterministic drifting bubbles/waves.
+	density := 14
+	if speed >= 100*1024 {
+		density = 9
+	}
+	if speed >= 1024*1024 {
+		density = 6
+	}
+	artStartRow := (innerH - len(art) - 3) / 2
+	if artStartRow < 1 {
+		artStartRow = 1
+	}
+	artW := len(art[0])
+	artPadL := (innerW - artW) / 2
+	if artPadL < 0 {
+		artPadL = 0
+	}
+
+	lines := make([]string, 0, innerH)
+	for r := 0; r < innerH-2; r++ {
+		if r >= artStartRow && r < artStartRow+len(art) {
+			leftSp := strings.Repeat(" ", artPadL)
+			rightSp := ""
+			if rem := innerW - artPadL - artW; rem > 0 {
+				rightSp = strings.Repeat(" ", rem)
+			}
+			lines = append(lines, leftSp+speedUpStyle.Render(art[r-artStartRow])+rightSp)
+			continue
+		}
+		var row strings.Builder
+		for c := 0; c < innerW; c++ {
+			v := (c + step*(1+(r%2)) + r*17) % (density * 7)
+			switch v {
+			case 0:
+				row.WriteRune('~')
+			case 3:
+				row.WriteRune('·')
+			case 6:
+				row.WriteRune('°')
+			default:
+				row.WriteRune(' ')
+			}
+		}
+		lines = append(lines, dimStyle.Render(row.String()))
+	}
+
+	beacon := "Surface"
+	if m.exitIP != nil {
+		beacon = fmt.Sprintf("%s (%s)", m.exitIP.IP, m.exitIP.CountryCode)
+	}
+	telemetry := fmt.Sprintf(
+		"DEEP DIVE  •  Depth: -%dm  •  Beacon: %s  •  Current: ↓ %s  ↑ %s",
+		m.cfg.MixedPort,
+		beacon,
+		formatSpeed(m.down),
+		formatSpeed(m.up),
+	)
+	lines = append(lines, dimStyle.Render(strings.Repeat("─", innerW)))
+	lines = append(lines, joinLeftRight(speedDownStyle.Render(ansi.Truncate(telemetry, innerW-24, "…")), dimStyle.Render("press any key to resurface"), innerW))
+
+	return cardStyle.Width(totalW - 2).Height(innerH).MaxHeight(innerH + 2).Render(strings.Join(lines, "\n"))
 }
 
 func (m model) renderFooter(w int) string {
@@ -1874,111 +1983,8 @@ func (m model) renderFooter(w int) string {
 		hints = "1/2/3: Tabs  •  Click/Enter: Switch Node  •  /: Search  •  o: Sort Speed  •  t/T: Test  •  q: Close UI  •  Q: Power Off All"
 	case tabSettings:
 		hints = "1/2/3: Tabs  •  Click any setting to toggle & auto-save  •  q: Close UI  •  Q: Power Off All"
-	case tabSonar:
-		hints = "🌊 Deep Ocean Sonar  •  ~/Esc/1/2/3: Surface to Dashboard  •  i: Ping Sonar Beacon  •  q: Close UI"
 	}
 	return dimStyle.Render(ansi.Truncate(hints, w, "…"))
-}
-
-func sonarTickCmd() tea.Cmd {
-	return tea.Tick(380*time.Millisecond, func(time.Time) tea.Msg {
-		return sonarTickMsg{}
-	})
-}
-
-var sonarQuotes = []string{
-	"\"Packets glide silently beneath the firewall, where only the manta swims.\"",
-	"\"In the Mariana Trench (-7,890m), every handshake is zero-loss.\"",
-	"\"No borders exist below the thermocline — only pure TCP/UDP flow.\"",
-	"\"Ride the Kuroshio Current: low latency, wide wingspan, zero turbulence.\"",
-}
-
-func (m model) renderSonar(totalW, bodyH int) string {
-	innerW := totalW - 4
-	if innerW < 40 {
-		innerW = 40
-	}
-	innerH := bodyH - 2
-	if innerH < 12 {
-		innerH = 12
-	}
-
-	frameA := []string{
-		"         ·  ˚  .   🫧   .   ˚  ·     ~  ~  ~",
-		"             ╭◜◝ ͡ ◜◝╮    ╭◜◝ ͡ ◜◝╮",
-		"          ╱￣￣╲  ╰◟◞ ͜ ◟◞╯  ╱￣￣╲",
-		"       ╱￣      ╲___╭──╮___╱      ￣╲",
-		"    ╭─╯   ●         │  │         ●   ╰─╮",
-		"     ╲___          ╭╯  ╰╮          ___╱",
-		"         ￣￣╲____╱      ╲____╱￣￣",
-		"                 │   │   │",
-		"                  ╲  │  ╱",
-		"                   ╲ │ ╱",
-		"                    ╲│╱",
-	}
-	frameB := []string{
-		"      ~  ~  ~   ·  ˚  .   🫧   .   ˚  ·",
-		"             ╭◜◝ ͡ ◜◝╮    ╭◜◝ ͡ ◜◝╮",
-		"            ╱￣╲  ╰◟◞ ͜ ◟◞╯  ╱￣╲",
-		"         ╱￣    ╲___╭──╮___╱    ￣╲",
-		"      ╭─╯  ●        │  │        ●  ╰─╮",
-		"       ╲___        ╭╯  ╰╮        ___╱",
-		"           ￣￣╲__╱      ╲__╱￣￣",
-		"                 │   │   │",
-		"                  ╲  │  ╱",
-		"                   ╲ │ ╱",
-		"                    ▼",
-	}
-
-	art := frameA
-	if m.sonarFrame%2 == 1 {
-		art = frameB
-	}
-	drift := (m.sonarFrame % 7) - 3
-	if drift < 0 {
-		drift = -drift
-	}
-	padLeft := (innerW - 46) / 2
-	if padLeft < 2 {
-		padLeft = 2
-	}
-	padStr := strings.Repeat(" ", padLeft+drift)
-
-	depth := fmt.Sprintf("-%dm (Mariana Trench • utun %s)", m.cfg.MixedPort, m.tunStack)
-	if !m.tunOn {
-		depth = fmt.Sprintf("-%dm (Continental Shelf • %s)", m.cfg.MixedPort, strings.ToUpper(m.mode))
-	}
-	beacon := "Scanning abyssal beacons..."
-	if m.exitIP != nil {
-		beacon = fmt.Sprintf("%s (%s, %s • %s)", m.exitIP.IP, m.exitIP.Country, m.exitIP.City, m.exitIP.ISP)
-	}
-	_, chain, exitDelay := m.resolveActiveExit()
-	if exitDelay > 0 {
-		chain = fmt.Sprintf("%s (%dms sonar ping)", chain, exitDelay)
-	}
-	knots := float64(m.down+m.up) / (128 * 1024.0)
-	velocity := fmt.Sprintf("%.1f Knots  (↓ %s  ↑ %s  •  %d active streams)", knots, formatSpeed(m.down), formatSpeed(m.up), m.connsCount)
-	quote := sonarQuotes[(m.sonarFrame/12)%len(sonarQuotes)]
-
-	lines := []string{
-		joinLeftRight(cardTitleStyle.Render("🌊 Deep Ocean Sonar // Manta Glider"), dimStyle.Render("Easter Egg • ~ to exit"), innerW),
-		dimStyle.Render(strings.Repeat("─", innerW)),
-	}
-	for _, a := range art {
-		lines = append(lines, speedUpStyle.Render(ansi.Truncate(padStr+a, innerW, "")))
-	}
-	lines = append(lines,
-		dimStyle.Render(strings.Repeat("─", innerW)),
-		kvLine("Depth", kvValStyle.Render(depth), innerW),
-		kvLine("Sonar Beacon", kvValStyle.Render(beacon), innerW),
-		kvLine("Ocean Current", exitLabelStyle.Render(chain), innerW),
-		kvLine("Glide Speed", speedDownStyle.Render(velocity), innerW),
-		dimStyle.Render(ansi.Truncate("  "+quote, innerW, "…")),
-	)
-	if len(lines) > innerH {
-		lines = lines[:innerH]
-	}
-	return cardStyle.Width(totalW).Height(innerH).MaxHeight(innerH + 2).Render(strings.Join(lines, "\n"))
 }
 
 func (m model) renderSettings(totalW, bodyH int) string {

@@ -33,9 +33,13 @@ const (
 	burstSpeedFloor   = 32 * 1024
 )
 
-func mantaPointInBody(fx, fy, wingScale float64) bool {
+func mantaPointInBody(fx, fy, wingFlex float64) bool {
 	const cx = 11.0
 	dx := math.Abs(fx - cx)
+	// Subtle vertical wingtip flex for smooth swimming animation when benchmarking or surfing >= 5 MB/s.
+	if dx > 4.0 {
+		fy -= wingFlex * (dx - 4.0) / 6.5
+	}
 
 	switch {
 	case fy >= 2.6 && fy <= 5.2:
@@ -46,11 +50,11 @@ func mantaPointInBody(fx, fy, wingScale float64) bool {
 	case fy > 5.2 && fy <= 11.2:
 		t := (fy - 5.2) / 6.0
 		curve := math.Pow(t, 0.88)
-		maxW := 3.1 + curve*(7.4*wingScale)
+		maxW := 3.1 + curve*7.4
 		return dx <= maxW
 	case fy > 11.2 && fy <= 15.4:
 		t := (fy - 11.2) / 4.2
-		maxW := (10.5 * wingScale) * math.Pow(1.0-t, 1.25)
+		maxW := 10.5 * math.Pow(1.0-t, 1.25)
 		if maxW < 0.75 {
 			maxW = 0.75
 		}
@@ -63,7 +67,7 @@ func mantaPointInBody(fx, fy, wingScale float64) bool {
 	return false
 }
 
-func mantaFrameIconPNG(wingScale float64) []byte {
+func mantaTemplateIconPNG(wingFlex float64) []byte {
 	const size = 44
 	const samples = 4
 	img := image.NewNRGBA(image.Rect(0, 0, size, size))
@@ -75,7 +79,7 @@ func mantaFrameIconPNG(wingScale float64) []byte {
 				for sx := 0; sx < samples; sx++ {
 					fx := (float64(x) + (float64(sx)+0.5)/float64(samples)) * (22.0 / float64(size))
 					fy := (float64(y) + (float64(sy)+0.5)/float64(samples)) * (22.0 / float64(size))
-					if mantaPointInBody(fx, fy, wingScale) {
+					if mantaPointInBody(fx, fy, wingFlex) {
 						hits++
 					}
 				}
@@ -90,10 +94,6 @@ func mantaFrameIconPNG(wingScale float64) []byte {
 	var buf bytes.Buffer
 	_ = png.Encode(&buf, img)
 	return buf.Bytes()
-}
-
-func mantaTemplateIconPNG() []byte {
-	return mantaFrameIconPNG(1.0)
 }
 
 func statusDotPNG(r, g, b uint8) []byte {
@@ -144,30 +144,16 @@ func Run(cfg *config.AppConfig, mgr *core.Manager, client *api.Client) error {
 
 	onReady := func() {
 		iconFrames := [][]byte{
-			mantaFrameIconPNG(1.00), // Neutral glide
-			mantaFrameIconPNG(1.10), // Wide wingspan
-			mantaFrameIconPNG(1.00), // Neutral glide
-			mantaFrameIconPNG(0.76), // Swept wing stroke
+			mantaTemplateIconPNG(0.0),
+			mantaTemplateIconPNG(-1.35),
+			mantaTemplateIconPNG(0.0),
+			mantaTemplateIconPNG(1.35),
 		}
 		if len(iconFrames[0]) > 0 {
 			systray.SetTemplateIcon(iconFrames[0], iconFrames[0])
 		}
 		systray.SetTitle("")
 		systray.SetTooltip("Manta")
-
-		flapWings := func(cycles int) {
-			for c := 0; c < cycles; c++ {
-				for _, f := range iconFrames {
-					if len(f) > 0 {
-						systray.SetTemplateIcon(f, f)
-					}
-					time.Sleep(120 * time.Millisecond)
-				}
-			}
-			if len(iconFrames[0]) > 0 {
-				systray.SetTemplateIcon(iconFrames[0], iconFrames[0])
-			}
-		}
 
 		dotOnline := statusDotPNG(16, 185, 129) // Emerald (#10B981)
 		dotBusy := statusDotPNG(245, 158, 11)   // Amber (#F59E0B)
@@ -259,7 +245,27 @@ func Run(cfg *config.AppConfig, mgr *core.Manager, client *api.Client) error {
 			lastTelemText  string
 			lastStatusText string
 			lastStatusIcon int
+			flapCount      int
+			flapPhase      int
 		)
+
+		stepWingFlap := func(active bool) {
+			mu.Lock()
+			if !active {
+				if flapPhase != 0 {
+					flapPhase = 0
+					mu.Unlock()
+					systray.SetTemplateIcon(iconFrames[0], iconFrames[0])
+					return
+				}
+				mu.Unlock()
+				return
+			}
+			flapPhase = (flapPhase + 1) % len(iconFrames)
+			frame := iconFrames[flapPhase]
+			mu.Unlock()
+			systray.SetTemplateIcon(frame, frame)
+		}
 
 		setBarTitle := func(title string) {
 			mu.Lock()
@@ -555,9 +561,11 @@ func Run(cfg *config.AppConfig, mgr *core.Manager, client *api.Client) error {
 					mu.Lock()
 					curUp = sample.Up
 					curDown = sample.Down
+					isFlapping := flapCount > 0 || sample.Down >= 5<<20 || sample.Up >= 5<<20
 					mu.Unlock()
 					updateTelemetryLine()
 					updateTitle()
+					stepWingFlap(isFlapping)
 				}
 				time.Sleep(2 * time.Second)
 			}
@@ -722,8 +730,32 @@ func Run(cfg *config.AppConfig, mgr *core.Manager, client *api.Client) error {
 
 				case <-mBestNode.ClickedCh:
 					go func() {
+						mu.Lock()
+						flapCount++
+						mu.Unlock()
+						stopFlap := make(chan struct{})
+						go func() {
+							t := time.NewTicker(220 * time.Millisecond)
+							defer t.Stop()
+							for {
+								select {
+								case <-stopFlap:
+									return
+								case <-t.C:
+									stepWingFlap(true)
+								}
+							}
+						}()
+						defer func() {
+							close(stopFlap)
+							mu.Lock()
+							flapCount--
+							stillActive := flapCount > 0
+							mu.Unlock()
+							stepWingFlap(stillActive)
+						}()
+
 						mBestNode.SetTitle("⏳ Testing...")
-						go flapWings(6)
 						proxies, err := client.GetProxies()
 						if err != nil {
 							mBestNode.SetTitle("⚡ Auto-Select Fastest")

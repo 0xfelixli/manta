@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"math/rand"
 	"strings"
 	"time"
 
@@ -14,125 +15,67 @@ func init() {
 	rootCmd.AddCommand(diveCmd)
 }
 
-var oceanQuotes = []string{
-	"\"Packets glide silently beneath the firewall, where only the manta swims.\"",
-	"\"In the Mariana Trench (-7,890m), every handshake is zero-loss.\"",
-	"\"A calm surface hides a 10 Gbps deep-ocean current.\"",
-	"\"No borders exist below the thermocline — only pure TCP/UDP flow.\"",
-	"\"Sonar locked. Fake-IP beacons echoing at 0.2ms across the abyss.\"",
-	"\"Ride the Kuroshio Current: low latency, wide wingspan, zero turbulence.\"",
-}
-
-func trenchName(cc, city string) string {
-	switch strings.ToUpper(cc) {
-	case "JP":
-		return "Japan Trench • Kuroshio Current (" + emptyOr(city, "Tokyo") + ")"
-	case "SG":
-		return "Sunda Trench • Malacca Abyss (" + emptyOr(city, "Singapore") + ")"
-	case "US":
-		return "Monterey Canyon • Pacific Ridge (" + emptyOr(city, "San Jose") + ")"
-	case "TW":
-		return "Ryukyu Trench • Kuroshio Ridge (" + emptyOr(city, "Taipei") + ")"
-	case "HK":
-		return "South China Basin (" + emptyOr(city, "Hong Kong") + ")"
-	default:
-		if city != "" {
-			return "Abyssal Plain (" + city + ")"
-		}
-		return "Open Ocean • International Waters"
-	}
+var oceanFortunes = []string{
+	"Packets glide silently beneath the firewall — 0% turbulence in the Mariana Trench.",
+	"A manta ray never stops swimming; neither does your TCP keep-alive pool.",
+	"Deep currents run fastest where the routing table is cleanest.",
+	"Smooth wings, zero jitter, sub-100ms across the Pacific.",
+	"Encrypted payloads drifting effortlessly past the reef.",
 }
 
 var diveCmd = &cobra.Command{
-	Use:     "dive",
-	Aliases: []string{"swim", "sonar"},
-	Hidden:  true,
-	Short:   "Easter egg: Deep-sea sonar telemetry & Manta Ray glider",
+	Use:    "dive",
+	Hidden: true,
+	Short:  "Enter the deep-sea manta telemetry card (easter egg)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		_, cfg, mgr, client, err := loadContext()
 		if err != nil {
 			return err
 		}
 
-		art := []string{
-			"               ·  ˚  .   🫧   .   ˚  ·",
-			"                   ╭◜◝ ͡ ◜◝╮    ╭◜◝ ͡ ◜◝╮",
-			"                ╱￣￣╲  ╰◟◞ ͜ ◟◞╯  ╱￣￣╲",
-			"             ╱￣      ╲___╭──╮___╱      ￣╲",
-			"          ╭─╯   ●         │  │         ●   ╰─╮",
-			"           ╲___          ╭╯  ╰╮          ___╱",
-			"               ￣￣╲____╱      ╲____╱￣￣",
-			"                       │   │   │",
-			"                        ╲  │  ╱",
-			"                         ╲ │ ╱",
-			"                          ╲│╱",
-			"                           ▼",
-		}
+		art := `
+          ~   .     *        ~       .      ~
+               __                 __
+              /  \               /  \
+         ~   / /\ \    .---.    / /\ \    ~
+            / /  \ \__/ o o \__/ /  \ \
+           /_/    \___   ▽   ___/    \_\
+                .     \     /     .
+           ~           \   /           ~
+                        | |
+                        | |     .
+          .             ':'            ~
+`
+		fmt.Print(cliOnline.Render(art))
 
-		fmt.Println()
-		for _, line := range art {
-			fmt.Println("  " + cliAccent.Render(line))
-		}
-		fmt.Println()
-
-		running, pid := mgr.IsRunning()
-		depth := fmt.Sprintf("-%dm (Thermocline • Standby)", cfg.MixedPort)
-		sonarState := cliOffline.Render("○ SURFACE DOCKED")
-		activeConns := 0
-		sessionBytes := int64(0)
-
+		running, _ := mgr.IsRunning()
+		depth := fmt.Sprintf("-%dm (Surface)", cfg.MixedPort)
+		beacon := "Offline"
 		if running {
-			sonarState = cliOnline.Render("● SUBMERGED") + cliMuted.Render(fmt.Sprintf(" (vessel pid %d)", pid))
+			depth = fmt.Sprintf("-%dm (Mariana Trench • TUN/Proxy)", cfg.MixedPort)
 			if live, err := client.GetConfigs(); err == nil {
 				if live.Tun.Enable {
-					depth = fmt.Sprintf("-%dm (Mariana Trench • utun %s)", cfg.MixedPort, emptyOr(live.Tun.Stack, "Mixed"))
-				} else {
-					depth = fmt.Sprintf("-%dm (Continental Shelf • %s)", cfg.MixedPort, strings.ToUpper(live.Mode))
+					depth = fmt.Sprintf("-%dm (Abyssal Zone • utun %s)", cfg.MixedPort, emptyOr(live.Tun.Stack, "mixed"))
 				}
 			}
-			if summary, err := client.GetConnections(); err == nil {
-				activeConns = len(summary.Connections)
-				sessionBytes = summary.DownloadTotal + summary.UploadTotal
-			}
-		}
-
-		beacon := "Scanning abyssal beacons..."
-		if running {
 			if info, err := api.FetchExitIP(cfg.MixedPort); err == nil {
-				beacon = fmt.Sprintf("%s  •  %s", cliVal.Render(info.IP), trenchName(info.CountryCode, info.City))
+				loc := strings.TrimSpace(strings.Join([]string{info.City, info.CountryCode}, ", "))
+				beacon = fmt.Sprintf("%s (%s)", info.IP, loc)
 			} else {
-				beacon = cliMuted.Render("Silent Running (stealth beacon)")
+				beacon = "127.0.0.1:" + fmt.Sprintf("%d", cfg.MixedPort)
 			}
 		}
 
-		fmt.Printf("  %s  %s\n", cliBadge.Render("MANTA SONAR"), sonarState)
-		fmt.Println(renderKV("Depth", cliVal.Render(depth)))
+		fmt.Printf("  %s  %s\n", cliBadge.Render("DEEP DIVE"), cliAccent.Render("Manta Ray Telemetry"))
+		fmt.Println(renderKV("Depth", depth))
 		fmt.Println(renderKV("Beacon", beacon))
-		fmt.Println(renderKV("Current", fmt.Sprintf("%d active streams  •  %s displaced", activeConns, formatDiveBytes(sessionBytes))))
 		if meta, ok := cfg.Profiles[cfg.ActiveProfile]; ok {
 			if q := meta.QuotaSummary(); q != "" {
-				fmt.Println(renderKV("Reserves", q))
+				fmt.Println(renderKV("Oxygen", q))
 			}
 		}
-
-		quote := oceanQuotes[time.Now().UnixNano()%int64(len(oceanQuotes))]
-		fmt.Println()
-		fmt.Println("  " + cliMuted.Render(quote))
-		fmt.Println("  " + cliMuted.Render("Tip: press `~` (or click the MANTA badge) inside `manta tui` for live Sonar Mode."))
-		fmt.Println()
+		quote := oceanFortunes[rand.New(rand.NewSource(time.Now().UnixNano())).Intn(len(oceanFortunes))]
+		fmt.Printf("\n  %s\n\n", cliMuted.Render("“"+quote+"”"))
 		return nil
 	},
-}
-
-func formatDiveBytes(b int64) string {
-	switch {
-	case b >= 1<<30:
-		return fmt.Sprintf("%.2f GB", float64(b)/(1<<30))
-	case b >= 1<<20:
-		return fmt.Sprintf("%.1f MB", float64(b)/(1<<20))
-	case b >= 1<<10:
-		return fmt.Sprintf("%.1f KB", float64(b)/(1<<10))
-	default:
-		return fmt.Sprintf("%d B", b)
-	}
 }

@@ -25,11 +25,17 @@ description: >-
 
 ---
 
-## Quick Health Check (JSON or Human)
+## Quick Health Check & Diagnostics (JSON or Human)
 
 ```bash
+manta doctor --json
 manta status --ip --json
 curl -x http://127.0.0.1:7890 -sS --max-time 8 -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" https://www.gstatic.com/generate_204
+```
+
+If DNS or TUN routing seems broken, run:
+```bash
+manta doctor --fix --json
 ```
 
 Or run the bundled script:

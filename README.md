@@ -96,4 +96,6 @@ manta down
 | `manta mode [rule\|global\|direct]` | Get or switch active routing mode |
 | `manta sysproxy [on\|off\|status]` | Toggle macOS system HTTP/HTTPS/SOCKS5 proxy |
 | `manta config [set <key> <val>]` | Inspect or persist user preferences (`sort_by_speed`, `mode`, `last_tab`, etc.) |
+| `manta doctor [--fix] [--json]` | Run end-to-end diagnostics for daemon, TUN, DNS Fake-IP, GeoIP & connectivity |
+| `manta skill [install\|show\|status]` | Install or print the embedded AI agent skill (Antigravity / Claude Code / Codex) |
 | `manta completion [fish\|zsh\|bash]` | Auto-install shell completions with dynamic group/node/profile Tab completion |
