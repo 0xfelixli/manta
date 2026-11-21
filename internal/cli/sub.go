@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"sort"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -31,20 +30,21 @@ var subAddCmd = &cobra.Command{
 			return err
 		}
 		fmt.Printf("Fetching profile %q...\n", name)
-		if err := config.FetchProfile(paths, name, subURL); err != nil {
+		meta, err := config.FetchProfile(paths, name, subURL)
+		if err != nil {
 			return err
 		}
-		cfg.Profiles[name] = config.ProfileMeta{
-			URL:       subURL,
-			UpdatedAt: time.Now(),
-		}
+		cfg.Profiles[name] = meta
 		if cfg.ActiveProfile == "" {
 			cfg.ActiveProfile = name
 		}
 		if err := config.Save(paths, cfg); err != nil {
 			return err
 		}
-		fmt.Printf("Saved profile %q (active: %s)\n", name, cfg.ActiveProfile)
+		fmt.Printf("%s Saved profile %q (active: %s)\n", cliOnline.Render("✓"), name, cfg.ActiveProfile)
+		if q := meta.QuotaSummary(); q != "" {
+			fmt.Printf("  Quota: %s\n", q)
+		}
 		return nil
 	},
 }
@@ -67,12 +67,16 @@ var subListCmd = &cobra.Command{
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			mark := " "
+			mark := "  "
 			if name == cfg.ActiveProfile {
-				mark = "*"
+				mark = cliOnline.Render("● ")
 			}
 			meta := cfg.Profiles[name]
-			fmt.Printf("%s %-16s updated %s\n", mark, name, meta.UpdatedAt.Format("2006-01-02 15:04"))
+			quota := ""
+			if q := meta.QuotaSummary(); q != "" {
+				quota = "  •  " + cliAccent.Render(q)
+			}
+			fmt.Printf("%s%-14s %s%s\n", mark, cliVal.Render(name), cliMuted.Render("updated "+meta.UpdatedAt.Format("2006-01-02 15:04")), quota)
 		}
 		return nil
 	},
@@ -148,15 +152,18 @@ var subUpdateCmd = &cobra.Command{
 			return fmt.Errorf("profile %q has no subscription URL", name)
 		}
 		fmt.Printf("Updating profile %q...\n", name)
-		if err := config.FetchProfile(paths, name, meta.URL); err != nil {
+		newMeta, err := config.FetchProfile(paths, name, meta.URL)
+		if err != nil {
 			return err
 		}
-		meta.UpdatedAt = time.Now()
-		cfg.Profiles[name] = meta
+		cfg.Profiles[name] = newMeta
 		if err := config.Save(paths, cfg); err != nil {
 			return err
 		}
-		fmt.Printf("Updated profile %q. Restart with `manta down && manta up` to apply.\n", name)
+		fmt.Printf("%s Updated profile %q\n", cliOnline.Render("✓"), name)
+		if q := newMeta.QuotaSummary(); q != "" {
+			fmt.Printf("  Quota: %s\n", q)
+		}
 		return nil
 	},
 }

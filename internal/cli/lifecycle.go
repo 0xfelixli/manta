@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ var (
 	upWithTun        bool
 	downWithSysProxy bool
 	statusWithIP     bool
+	statusJSON       bool
 	daemonHomeDir    string
 	daemonConfigFile string
 )
@@ -29,6 +31,7 @@ func init() {
 	upCmd.Flags().BoolVar(&upWithTun, "tun", false, "Enable TUN virtual interface to capture all system & terminal traffic (requires sudo)")
 	downCmd.Flags().BoolVar(&downWithSysProxy, "sys", false, "Also disable macOS system proxy")
 	statusCmd.Flags().BoolVar(&statusWithIP, "ip", false, "Also query current exit IP and geolocation via the proxy")
+	statusCmd.Flags().BoolVar(&statusJSON, "json", false, "Output status as structured JSON (for AI agents & scripts)")
 	daemonCmd.Flags().StringVarP(&daemonHomeDir, "dir", "d", "", "mihomo home directory")
 	daemonCmd.Flags().StringVarP(&daemonConfigFile, "file", "f", "", "mihomo runtime config file")
 	rootCmd.AddCommand(initCmd, upCmd, downCmd, statusCmd, logsCmd, daemonCmd)
@@ -169,9 +172,50 @@ var statusCmd = &cobra.Command{
 			return err
 		}
 		running, pid := mgr.IsRunning()
+		quotaStr := ""
+		if cfg.ActiveProfile != "" {
+			if meta, ok := cfg.Profiles[cfg.ActiveProfile]; ok {
+				quotaStr = meta.QuotaSummary()
+			}
+		}
+
+		if statusJSON {
+			out := map[string]any{
+				"online":      running,
+				"pid":         pid,
+				"profile":     cfg.ActiveProfile,
+				"quota":       quotaStr,
+				"mixed_port":  cfg.MixedPort,
+				"controller":  cfg.Controller,
+				"custom_rules": len(cfg.CustomRules),
+			}
+			if running {
+				if ver, err := client.Version(); err == nil {
+					out["version"] = ver.Version
+				}
+				if live, err := client.GetConfigs(); err == nil {
+					out["mode"] = live.Mode
+					out["tun_enabled"] = live.Tun.Enable
+					out["tun_stack"] = live.Tun.Stack
+					out["allow_lan"] = live.AllowLan
+				}
+				if statusWithIP {
+					if info, err := api.FetchExitIP(cfg.MixedPort); err == nil {
+						out["exit_ip"] = info
+					}
+				}
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(out)
+		}
+
 		if !running {
 			fmt.Printf("%s  %s\n", cliBadge.Render("MANTA"), cliOffline.Render("○ STOPPED"))
 			fmt.Println(renderKV("Profile", emptyOr(cfg.ActiveProfile, "(none)")))
+			if quotaStr != "" {
+				fmt.Println(renderKV("Quota", quotaStr))
+			}
 			return nil
 		}
 
@@ -180,7 +224,11 @@ var statusCmd = &cobra.Command{
 			verStr = "mihomo " + ver.Version
 		}
 		fmt.Printf("%s  %s  %s\n", cliBadge.Render("MANTA"), cliOnline.Render("● ONLINE"), cliMuted.Render(fmt.Sprintf("(pid %d • %s)", pid, verStr)))
-		fmt.Println(renderKV("Profile", cliVal.Render(emptyOr(cfg.ActiveProfile, "(default direct)"))))
+		profLine := cliVal.Render(emptyOr(cfg.ActiveProfile, "(default direct)"))
+		if quotaStr != "" {
+			profLine += "  " + cliMuted.Render("("+quotaStr+")")
+		}
+		fmt.Println(renderKV("Profile", profLine))
 		if live, err := client.GetConfigs(); err == nil {
 			fmt.Println(renderKV("Mode", cliAccent.Render(strings.ToUpper(live.Mode))))
 			if live.Tun.Enable {

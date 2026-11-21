@@ -18,6 +18,7 @@ import (
 	zone "github.com/lrstanley/bubblezone"
 
 	"github.com/0xfelixli/manta/internal/api"
+	"github.com/0xfelixli/manta/internal/autostart"
 	"github.com/0xfelixli/manta/internal/config"
 	"github.com/0xfelixli/manta/internal/core"
 	"github.com/0xfelixli/manta/internal/sysproxy"
@@ -755,11 +756,11 @@ func (m model) updateSubCmd() tea.Cmd {
 		if !ok || meta.URL == "" {
 			return actionResultMsg{err: fmt.Errorf("profile %q has no subscription URL", name)}
 		}
-		if err := config.FetchProfile(m.mgr.Paths, name, meta.URL); err != nil {
+		newMeta, err := config.FetchProfile(m.mgr.Paths, name, meta.URL)
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
-		meta.UpdatedAt = time.Now()
-		m.cfg.Profiles[name] = meta
+		m.cfg.Profiles[name] = newMeta
 		_ = config.Save(m.mgr.Paths, m.cfg)
 
 		m.cfg.TunEnabled = m.tunOn
@@ -769,11 +770,29 @@ func (m model) updateSubCmd() tea.Cmd {
 		if err := m.client.ReloadConfig(m.mgr.Paths.RuntimeFile); err != nil {
 			return actionResultMsg{err: fmt.Errorf("profile saved, reload failed: %w", err)}
 		}
+		msg := fmt.Sprintf("✓ Updated & reloaded subscription %q", name)
+		if q := newMeta.QuotaSummary(); q != "" {
+			msg += " (" + q + ")"
+		}
 		return actionResultMsg{
-			status:    fmt.Sprintf("✓ Updated & reloaded subscription %q", name),
+			status:    msg,
 			kind:      toastSuccess,
 			reload:    true,
 			refreshIP: true,
+		}
+	}
+}
+
+func (m model) closeAllConnsCmd() tea.Cmd {
+	return func() tea.Msg {
+		if err := m.client.CloseAllConnections(); err != nil {
+			return actionResultMsg{err: err}
+		}
+		_ = m.client.FlushFakeIP()
+		return actionResultMsg{
+			status: "✓ Closed all active connections & flushed Fake-IP DNS cache",
+			kind:   toastSuccess,
+			reload: true,
 		}
 	}
 }
@@ -1366,6 +1385,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.checkingIP = true
 			m.setToast(toastBusy, "Refreshing...")
 			return m, tea.Batch(m.loadStateCmd(), m.fetchExitIPCmd())
+
+		case "x":
+			m.busy = true
+			m.setToast(toastBusy, "Closing active connections & flushing DNS...")
+			return m, m.closeAllConnsCmd()
 		}
 
 		if m.activeTab == tabProxies {
@@ -1532,6 +1556,18 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.setToast(toastInfo, "✓ Auto-test on open: OFF")
 
+		case zone.Get("set:autostart").InBounds(msg):
+			if autostart.IsEnabled() {
+				if err := autostart.Disable(); err != nil {
+					return m, m.setToast(toastError, "✗ "+err.Error())
+				}
+				return m, m.setToast(toastInfo, "✓ Launch at Login: OFF")
+			}
+			if err := autostart.Enable(); err != nil {
+				return m, m.setToast(toastError, "✗ "+err.Error())
+			}
+			return m, m.setToast(toastSuccess, "✓ Launch at Login: ON")
+
 		case zone.Get("set:mode:rule").InBounds(msg):
 			m.mode = "rule"
 			m.savePrefs()
@@ -1625,6 +1661,11 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.checkingIP = true
 			m.setToast(toastBusy, "Checking exit IP...")
 			return m, m.fetchExitIPCmd()
+
+		case zone.Get("ctl:closeconns").InBounds(msg):
+			m.busy = true
+			m.setToast(toastBusy, "Closing active connections & flushing DNS...")
+			return m, m.closeAllConnsCmd()
 		}
 
 		for i, item := range m.groupList.Items() {
@@ -1839,6 +1880,11 @@ func (m model) renderSettings(totalW, bodyH int) string {
 		autoTestSwitch = zone.Mark("set:autotest", switchOnStyle.Render("● ON"))
 	}
 
+	autostartSwitch := zone.Mark("set:autostart", switchOffStyle.Render("○ OFF"))
+	if autostart.IsEnabled() {
+		autostartSwitch = zone.Mark("set:autostart", switchOnStyle.Render("● ON"))
+	}
+
 	lastGrp := m.cfg.LastGroup
 	if lastGrp == "" {
 		lastGrp = "(auto)"
@@ -1854,8 +1900,9 @@ func (m model) renderSettings(totalW, bodyH int) string {
 		kvLineRaw("Node Sort", sortSeg),
 		kvLineRaw("Startup Tab", startSeg),
 		kvLineRaw("Auto-Test", autoTestSwitch),
-		kvLine("Last Group", lastGrp, lw),
-		kvLine("Profile", profile, lw),
+		kvLineRaw("Login Start", autostartSwitch),
+		kvLine("Last Group", cleanDisplay(lastGrp), lw),
+		kvLine("Custom Rules", fmt.Sprintf("%d active (`manta rule ls`)", len(m.cfg.CustomRules)), lw),
 	}
 	if len(leftLines) > cardInnerH {
 		leftLines = leftLines[:cardInnerH]
@@ -2013,7 +2060,13 @@ func (m model) renderDashboard(totalW, bodyH int) string {
 	if profile == "" {
 		profile = "(default)"
 	}
-	profileRow := kvValStyle.Render(profile) + "  " + zone.Mark("ctl:updatesub", miniBtnStyle.Render("Update"))
+	quotaTag := ""
+	if meta, ok := m.cfg.Profiles[m.cfg.ActiveProfile]; ok {
+		if q := meta.QuotaSummary(); q != "" {
+			quotaTag = " " + dimStyle.Render("("+q+")")
+		}
+	}
+	profileRow := kvValStyle.Render(profile) + quotaTag + " " + zone.Mark("ctl:updatesub", miniBtnStyle.Render("Update"))
 
 	c1Lines := []string{
 		joinLeftRight(cardTitleStyle.Render("Controls & Core"), dimStyle.Render("mihomo "+m.version), tlW),
@@ -2114,8 +2167,10 @@ func (m model) renderDashboard(totalW, bodyH int) string {
 	if brCap < 1 {
 		brCap = 1
 	}
+	closeConnsBtn := zone.Mark("ctl:closeconns", miniBtnStyle.Render("Close All"))
+	brHeaderRight := dimStyle.Render(fmt.Sprintf("%d active ", len(m.conns))) + closeConnsBtn
 	brLines := []string{
-		joinLeftRight(cardTitleStyle.Render("Live Connections"), dimStyle.Render(fmt.Sprintf("%d active", len(m.conns))), brInnerW),
+		joinLeftRight(cardTitleStyle.Render("Live Connections"), brHeaderRight, brInnerW),
 		dimStyle.Render(strings.Repeat("─", brInnerW)),
 	}
 	if len(m.conns) == 0 {

@@ -304,6 +304,16 @@ func (c *Client) ReloadConfig(path string) error {
 	}, nil)
 }
 
+// CloseAllConnections terminates all currently active connections in mihomo.
+func (c *Client) CloseAllConnections() error {
+	return c.doJSON(http.MethodDelete, "/connections", nil, nil)
+}
+
+// FlushFakeIP clears mihomo's Fake-IP DNS cache.
+func (c *Client) FlushFakeIP() error {
+	return c.doJSON(http.MethodPost, "/cache/fakeip/flush", nil, nil)
+}
+
 // GetProxies returns all proxies and proxy groups.
 func (c *Client) GetProxies() (map[string]ProxyInfo, error) {
 	var res proxiesResp

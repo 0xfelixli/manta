@@ -1,16 +1,27 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/spf13/cobra"
+
+	"github.com/0xfelixli/manta/internal/api"
+)
+
+var (
+	nodeJSON       bool
+	nodeBestRegion string
 )
 
 func init() {
-	nodeCmd.AddCommand(nodeListCmd, nodeUseCmd, nodeTestCmd)
+	nodeCmd.PersistentFlags().BoolVar(&nodeJSON, "json", false, "Output results as structured JSON")
+	nodeBestCmd.Flags().StringVarP(&nodeBestRegion, "region", "r", "", "Filter candidate nodes by region (e.g. JP, SG, US, HK, TW)")
+	nodeCmd.AddCommand(nodeListCmd, nodeUseCmd, nodeTestCmd, nodeBestCmd)
 	rootCmd.AddCommand(nodeCmd, modeCmd)
 }
 
@@ -91,6 +102,15 @@ var nodeListCmd = &cobra.Command{
 				}
 			}
 			sort.Strings(groups)
+			if nodeJSON {
+				out := make([]api.ProxyInfo, 0, len(groups))
+				for _, g := range groups {
+					out = append(out, proxies[g])
+				}
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(out)
+			}
 			if len(groups) == 0 {
 				fmt.Println("No proxy groups found.")
 				return nil
@@ -110,6 +130,11 @@ var nodeListCmd = &cobra.Command{
 		group, ok := proxies[groupName]
 		if !ok {
 			return fmt.Errorf("group %q not found", groupName)
+		}
+		if nodeJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(group)
 		}
 		for _, node := range group.All {
 			mark := "  "
@@ -168,9 +193,9 @@ var nodeTestCmd = &cobra.Command{
 		}
 
 		type result struct {
-			name  string
-			delay int
-			err   error
+			Name  string `json:"name"`
+			Delay int    `json:"delay"`
+			Alive bool   `json:"alive"`
 		}
 		results := make([]result, len(group.All))
 		var wg sync.WaitGroup
@@ -186,14 +211,14 @@ var nodeTestCmd = &cobra.Command{
 				if err != nil {
 					d = -1
 				}
-				results[idx] = result{name: n, delay: d, err: err}
+				results[idx] = result{Name: n, Delay: d, Alive: d > 0}
 			}(i, node)
 		}
 		wg.Wait()
 
 		// Sort fastest first
 		sort.SliceStable(results, func(i, j int) bool {
-			ri, rj := results[i].delay, results[j].delay
+			ri, rj := results[i].Delay, results[j].Delay
 			if ri <= 0 {
 				ri = 1_000_000
 			}
@@ -203,20 +228,159 @@ var nodeTestCmd = &cobra.Command{
 			return ri < rj
 		})
 
+		if nodeJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(results)
+		}
+
 		alive := 0
 		for _, r := range results {
-			if r.delay > 0 {
+			if r.Delay > 0 {
 				alive++
 			}
 			mark := "  "
-			if r.name == group.Now {
+			if r.Name == group.Now {
 				mark = cliOnline.Render("● ")
 			}
-			fmt.Printf("%s%-38s %s\n", mark, r.name, renderDelayCLI(r.delay))
+			fmt.Printf("%s%-38s %s\n", mark, r.Name, renderDelayCLI(r.Delay))
 		}
 		fmt.Printf("\n%s\n", cliMuted.Render(fmt.Sprintf("Tested %d nodes in %s (%d alive, sorted by speed)", len(results), groupName, alive)))
 		return nil
 	},
+}
+
+var nodeBestCmd = &cobra.Command{
+	Use:               "best [group]",
+	Short:             "Benchmark nodes and automatically switch to the fastest node (optional --region filter)",
+	Args:              cobra.MaximumNArgs(1),
+	ValidArgsFunction: completeGroupNames,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		_, _, _, client, err := loadContext()
+		if err != nil {
+			return err
+		}
+		proxies, err := client.GetProxies()
+		if err != nil {
+			return err
+		}
+
+		groupName := ""
+		if len(args) == 1 {
+			groupName = args[0]
+		} else {
+			for name, p := range proxies {
+				if p.Type == "Selector" && (strings.Contains(name, "节点选择") || strings.EqualFold(name, "PROXY")) {
+					groupName = name
+					break
+				}
+			}
+			if groupName == "" {
+				for name, p := range proxies {
+					if p.Type == "Selector" && name != "GLOBAL" {
+						groupName = name
+						break
+					}
+				}
+			}
+		}
+		group, ok := proxies[groupName]
+		if !ok {
+			return fmt.Errorf("selector group %q not found", groupName)
+		}
+		if group.Type != "Selector" {
+			return fmt.Errorf("group %q (%s) is not a manual Selector group", groupName, group.Type)
+		}
+
+		var candidates []string
+		for _, n := range group.All {
+			if n == "DIRECT" || n == "REJECT" {
+				continue
+			}
+			if p, exists := proxies[n]; exists && (p.Type == "Selector" || p.Type == "URLTest" || p.Type == "Fallback") {
+				continue
+			}
+			if nodeBestRegion != "" && !matchesRegion(n, nodeBestRegion) {
+				continue
+			}
+			candidates = append(candidates, n)
+		}
+		if len(candidates) == 0 {
+			return fmt.Errorf("no candidate nodes matched in group %q (region=%q)", groupName, nodeBestRegion)
+		}
+
+		var (
+			mu       sync.Mutex
+			wg       sync.WaitGroup
+			bestNode string
+			bestMs   = 1_000_000
+			alive    int
+		)
+		sem := make(chan struct{}, 8)
+		for _, n := range candidates {
+			wg.Add(1)
+			go func(name string) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				d, err := client.TestDelay(name, "http://www.gstatic.com/generate_204", 4000)
+				if err == nil && d > 0 {
+					mu.Lock()
+					alive++
+					if d < bestMs {
+						bestMs = d
+						bestNode = name
+					}
+					mu.Unlock()
+				}
+			}(n)
+		}
+		wg.Wait()
+
+		if bestNode == "" {
+			return fmt.Errorf("all %d candidate nodes in %q timed out", len(candidates), groupName)
+		}
+		if err := client.SelectProxy(groupName, bestNode); err != nil {
+			return err
+		}
+		_ = client.CloseAllConnections()
+
+		if nodeJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(map[string]any{
+				"group":      groupName,
+				"node":       bestNode,
+				"delay_ms":   bestMs,
+				"tested":     len(candidates),
+				"alive":      alive,
+			})
+		}
+		fmt.Printf("%s Switched %s → %s (%s)\n", cliOnline.Render("✓"), cliAccent.Render(groupName), cliVal.Render(bestNode), renderDelayCLI(bestMs))
+		return nil
+	},
+}
+
+func matchesRegion(nodeName, region string) bool {
+	r := strings.ToUpper(strings.TrimSpace(region))
+	upper := strings.ToUpper(nodeName)
+	aliases := map[string][]string{
+		"JP": {"JP", "JAPAN", "日本", "东京", "大阪", "🇯🇵"},
+		"SG": {"SG", "SINGAPORE", "新加坡", "狮城", "🇸🇬"},
+		"US": {"US", "USA", "美国", "圣何塞", "洛杉矶", "西雅图", "🇺🇸"},
+		"HK": {"HK", "HONGKONG", "香港", "🇭🇰"},
+		"TW": {"TW", "TAIWAN", "台湾", "台北", "🇹🇼"},
+		"KR": {"KR", "KOREA", "韩国", "首尔", "🇰🇷"},
+	}
+	if list, ok := aliases[r]; ok {
+		for _, kw := range list {
+			if strings.Contains(upper, kw) {
+				return true
+			}
+		}
+		return false
+	}
+	return strings.Contains(upper, r)
 }
 
 var modeCmd = &cobra.Command{

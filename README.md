@@ -24,11 +24,12 @@ Designed for both human power users and autonomous AI agents.
 
 - **True Single Binary**: Embeds `mihomo v1.19.34` (with `gVisor` / `mixed` / `system` TUN stacks) directly inside `manta`. Zero external runtime dependencies.
 - **Oceanic Mineral TUI (`manta tui`)**:
-  - **`1 Dashboard`**: Inline clickable switches (`Daemon`, `RULE / GLOBAL / DIRECT`, `TUN Capture` with native macOS Touch ID / password prompt, `SysProxy`, `Allow LAN`), live Exit IP & geolocation, download sparkline with peak rate, clickable Proxy Groups overview, and real-time active connections.
+  - **`1 Dashboard`**: Inline clickable switches (`Daemon`, `RULE / GLOBAL / DIRECT`, `TUN Capture` with native macOS Touch ID / password prompt, `SysProxy`, `Allow LAN`), subscription traffic quota & expiration (`Subscription-Userinfo`), live Exit IP & geolocation, download sparkline with peak rate, clickable Proxy Groups overview, and real-time active connections with `[Close All]` (`x`).
   - **`2 Proxies`**: Split-pane group & node manager with mouse click/scroll, fuzzy search (`/`), speed sorting (`o`), and 3-bar latency signal indicators (`▪▪▪ 78ms`).
-  - **`3 Settings`**: Persistent preferences (`~/.config/manta/config.yaml`) for default sort order, startup tab, and auto-test on open.
+  - **`3 Settings`**: Persistent preferences (`~/.config/manta/config.yaml`) for default sort order, startup tab, auto-test on open, and macOS `Login Start` (`LaunchAgent`).
 - **Native macOS Menu Bar (`manta menubar -d`)**: Custom Manta Ray template icon in the top-right macOS menu bar with live bandwidth / country code and quick controls.
-- **AI Agent First**: Bundles an Antigravity / Claude skill (`.agents/skills/manta-proxy/`) and dynamic Fish / Zsh / Bash completions.
+- **Custom Routing Rules & Connection Control**: Prepend persistent high-priority rules (`manta rule add / ls / rm`) ahead of subscription rules with instant hot-reload, or sever active connections & flush Fake-IP cache (`manta conn close-all`).
+- **AI Agent First**: Bundles an Antigravity / Claude skill (`.agents/skills/manta-proxy/`), structured `--json` outputs, one-shot smart failover (`manta node best --region JP --json`), and dynamic Fish / Zsh / Bash completions.
 
 ---
 
@@ -83,11 +84,15 @@ manta down
 | :--- | :--- |
 | `manta up [--tun \| --sys]` | Start embedded proxy daemon (optionally with TUN or macOS system proxy) |
 | `manta down` | Power off daemon, disable macOS system proxy, and close menu bar |
-| `manta status [--ip]` | Show daemon state, TUN/SysProxy status, and live Exit IP geolocation |
+| `manta status [--ip] [--json]` | Show daemon state, TUN/SysProxy status, subscription quota, and live Exit IP |
 | `manta tui` | Open the 3-tab interactive terminal dashboard (`Dashboard`, `Proxies`, `Settings`) |
 | `manta menubar [-d]` | Start the native macOS menu bar icon (`-d` runs detached in background) |
-| `manta sub add / ls / use / update` | Manage Clash YAML subscriptions |
-| `manta node ls / test / use` | Inspect groups, benchmark node latency (sorted by speed), and switch nodes |
+| `manta sub add / ls / use / update` | Manage Clash YAML subscriptions and inspect traffic quota & expiration |
+| `manta node ls / test / use` | Inspect groups, benchmark node latency (`--json`), and switch nodes |
+| `manta node best [group] [--region CC]` | Auto-benchmark and switch to the lowest-latency healthy node (`--json`) |
+| `manta rule ls / add / rm` | Manage persistent high-priority custom routing rules (`DOMAIN-SUFFIX,...`) |
+| `manta conn ls / close-all` | List active connections (`--json`) or close all connections & flush Fake-IP |
+| `manta autostart [on\|off\|status]` | Manage macOS Launch at Login (`~/Library/LaunchAgents`) |
 | `manta mode [rule\|global\|direct]` | Get or switch active routing mode |
 | `manta sysproxy [on\|off\|status]` | Toggle macOS system HTTP/HTTPS/SOCKS5 proxy |
 | `manta config [set <key> <val>]` | Inspect or persist user preferences (`sort_by_speed`, `mode`, `last_tab`, etc.) |

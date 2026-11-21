@@ -9,6 +9,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -26,28 +27,60 @@ type Paths struct {
 	LogFile        string
 }
 
-// ProfileMeta stores metadata for a saved subscription profile.
+// ProfileMeta stores metadata and subscription traffic quota for a saved profile.
 type ProfileMeta struct {
-	URL       string    `yaml:"url,omitempty"`
-	UpdatedAt time.Time `yaml:"updated_at"`
+	URL       string    `yaml:"url,omitempty" json:"url,omitempty"`
+	UpdatedAt time.Time `yaml:"updated_at" json:"updated_at"`
+	Upload    int64     `yaml:"upload,omitempty" json:"upload,omitempty"`
+	Download  int64     `yaml:"download,omitempty" json:"download,omitempty"`
+	Total     int64     `yaml:"total,omitempty" json:"total,omitempty"`
+	Expire    int64     `yaml:"expire,omitempty" json:"expire,omitempty"`
+}
+
+// QuotaSummary returns a human-readable traffic & expiration summary if available.
+func (m ProfileMeta) QuotaSummary() string {
+	if m.Total <= 0 && m.Expire <= 0 {
+		return ""
+	}
+	var parts []string
+	if m.Total > 0 {
+		used := m.Upload + m.Download
+		pct := int(used * 100 / m.Total)
+		parts = append(parts, fmt.Sprintf("%s / %s (%d%%)", formatGib(used), formatGib(m.Total), pct))
+	}
+	if m.Expire > 0 {
+		exp := time.Unix(m.Expire, 0).Format("2006-01-02")
+		parts = append(parts, "exp "+exp)
+	}
+	return strings.Join(parts, " • ")
+}
+
+func formatGib(b int64) string {
+	const gb = 1 << 30
+	const mb = 1 << 20
+	if b >= gb {
+		return fmt.Sprintf("%.1f GB", float64(b)/float64(gb))
+	}
+	return fmt.Sprintf("%.0f MB", float64(b)/float64(mb))
 }
 
 // AppConfig represents ~/.config/manta/config.yaml.
 type AppConfig struct {
-	MixedPort      int                    `yaml:"mixed_port"`
-	AllowLan       bool                   `yaml:"allow_lan"`
-	Mode           string                 `yaml:"mode"`
-	TunEnabled     bool                   `yaml:"tun_enabled,omitempty"`
-	SortBySpeed    bool                   `yaml:"sort_by_speed,omitempty"`
-	AutoTestOnOpen bool                   `yaml:"auto_test_on_open,omitempty"`
-	StartupTab     string                 `yaml:"startup_tab,omitempty"` // "dashboard", "proxies", or "last"
-	LastTab        string                 `yaml:"last_tab,omitempty"`
-	LastGroup      string                 `yaml:"last_group,omitempty"`
-	Controller     string                 `yaml:"controller"`
-	Secret         string                 `yaml:"secret,omitempty"`
-	CoreBin        string                 `yaml:"core_bin,omitempty"`
-	ActiveProfile  string                 `yaml:"active_profile,omitempty"`
-	Profiles       map[string]ProfileMeta `yaml:"profiles,omitempty"`
+	MixedPort      int                    `yaml:"mixed_port" json:"mixed_port"`
+	AllowLan       bool                   `yaml:"allow_lan" json:"allow_lan"`
+	Mode           string                 `yaml:"mode" json:"mode"`
+	TunEnabled     bool                   `yaml:"tun_enabled,omitempty" json:"tun_enabled"`
+	SortBySpeed    bool                   `yaml:"sort_by_speed,omitempty" json:"sort_by_speed"`
+	AutoTestOnOpen bool                   `yaml:"auto_test_on_open,omitempty" json:"auto_test_on_open"`
+	StartupTab     string                 `yaml:"startup_tab,omitempty" json:"startup_tab,omitempty"` // "dashboard", "proxies", or "last"
+	LastTab        string                 `yaml:"last_tab,omitempty" json:"last_tab,omitempty"`
+	LastGroup      string                 `yaml:"last_group,omitempty" json:"last_group,omitempty"`
+	Controller     string                 `yaml:"controller" json:"controller"`
+	Secret         string                 `yaml:"secret,omitempty" json:"-"`
+	CoreBin        string                 `yaml:"core_bin,omitempty" json:"core_bin,omitempty"`
+	ActiveProfile  string                 `yaml:"active_profile,omitempty" json:"active_profile,omitempty"`
+	CustomRules    []string               `yaml:"custom_rules,omitempty" json:"custom_rules,omitempty"`
+	Profiles       map[string]ProfileMeta `yaml:"profiles,omitempty" json:"profiles,omitempty"`
 }
 
 // DefaultPaths returns the default ~/.config/manta directory layout.
@@ -175,43 +208,75 @@ func Save(p Paths, cfg *AppConfig) error {
 	return nil
 }
 
-// FetchProfile downloads a Clash YAML subscription and validates it before saving.
-func FetchProfile(p Paths, name, subURL string) error {
+// FetchProfile downloads a Clash YAML subscription, validates it, and extracts Subscription-Userinfo quota headers.
+func FetchProfile(p Paths, name, subURL string) (ProfileMeta, error) {
+	meta := ProfileMeta{
+		URL:       subURL,
+		UpdatedAt: time.Now(),
+	}
 	if err := p.EnsureDirs(); err != nil {
-		return err
+		return meta, err
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
 	req, err := http.NewRequest(http.MethodGet, subURL, nil)
 	if err != nil {
-		return fmt.Errorf("invalid subscription URL: %w", err)
+		return meta, fmt.Errorf("invalid subscription URL: %w", err)
 	}
 	req.Header.Set("User-Agent", "clash-verge/v1.7.7 mihomo")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("download subscription: %w", err)
+		return meta, fmt.Errorf("download subscription: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("subscription server returned HTTP %d", resp.StatusCode)
+		return meta, fmt.Errorf("subscription server returned HTTP %d", resp.StatusCode)
 	}
+
+	parseSubscriptionUserinfo(resp.Header.Get("Subscription-Userinfo"), &meta)
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 20<<20)) // 20 MB cap
 	if err != nil {
-		return fmt.Errorf("read subscription body: %w", err)
+		return meta, fmt.Errorf("read subscription body: %w", err)
 	}
 
 	var check map[string]any
 	if err := yaml.Unmarshal(raw, &check); err != nil || len(check) == 0 {
-		return fmt.Errorf("downloaded content is not a valid Clash YAML profile")
+		return meta, fmt.Errorf("downloaded content is not a valid Clash YAML profile")
 	}
 
 	if err := os.WriteFile(p.ProfilePath(name), raw, 0o600); err != nil {
-		return fmt.Errorf("write profile: %w", err)
+		return meta, fmt.Errorf("write profile: %w", err)
 	}
 	fixOwner(p.ProfilePath(name))
-	return nil
+	return meta, nil
+}
+
+func parseSubscriptionUserinfo(header string, meta *ProfileMeta) {
+	if header == "" || meta == nil {
+		return
+	}
+	for _, part := range strings.Split(header, ";") {
+		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		val, err := strconv.ParseInt(strings.TrimSpace(kv[1]), 10, 64)
+		if err != nil {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(kv[0])) {
+		case "upload":
+			meta.Upload = val
+		case "download":
+			meta.Download = val
+		case "total":
+			meta.Total = val
+		case "expire":
+			meta.Expire = val
+		}
+	}
 }
 
 // BuildRuntimeConfig merges manta's local inbound/controller settings into the active profile.
@@ -247,6 +312,22 @@ func BuildRuntimeConfig(p Paths, cfg *AppConfig) error {
 		doc["secret"] = cfg.Secret
 	} else {
 		delete(doc, "secret")
+	}
+
+	// Prepend user custom override rules ahead of subscription rules.
+	if len(cfg.CustomRules) > 0 {
+		mergedRules := make([]any, 0, len(cfg.CustomRules))
+		for _, r := range cfg.CustomRules {
+			mergedRules = append(mergedRules, r)
+		}
+		if existing, ok := doc["rules"].([]any); ok {
+			mergedRules = append(mergedRules, existing...)
+		} else if existingStr, ok := doc["rules"].([]string); ok {
+			for _, r := range existingStr {
+				mergedRules = append(mergedRules, r)
+			}
+		}
+		doc["rules"] = mergedRules
 	}
 
 	if cfg.TunEnabled {
