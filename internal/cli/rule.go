@@ -59,6 +59,11 @@ var ruleAddCmd = &cobra.Command{
 			}
 		}
 		cfg.CustomRules = append([]string{rule}, cfg.CustomRules...)
+		if running, _ := mgr.IsRunning(); running {
+			if live, err := client.GetConfigs(); err == nil && live.Tun.Enable {
+				cfg.TunEnabled = true
+			}
+		}
 		if err := config.Save(paths, cfg); err != nil {
 			return err
 		}
@@ -101,6 +106,11 @@ var ruleRmCmd = &cobra.Command{
 		}
 		removed := cfg.CustomRules[removeIdx]
 		cfg.CustomRules = append(cfg.CustomRules[:removeIdx], cfg.CustomRules[removeIdx+1:]...)
+		if running, _ := mgr.IsRunning(); running {
+			if live, err := client.GetConfigs(); err == nil && live.Tun.Enable {
+				cfg.TunEnabled = true
+			}
+		}
 		if err := config.Save(paths, cfg); err != nil {
 			return err
 		}

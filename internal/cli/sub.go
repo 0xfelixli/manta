@@ -105,7 +105,7 @@ var subUseCmd = &cobra.Command{
 	ValidArgsFunction: completeProfileNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
-		paths, cfg, mgr, _, err := loadContext()
+		paths, cfg, mgr, client, err := loadContext()
 		if err != nil {
 			return err
 		}
@@ -113,18 +113,24 @@ var subUseCmd = &cobra.Command{
 			return fmt.Errorf("profile %q not found", name)
 		}
 		cfg.ActiveProfile = name
+		if running, _ := mgr.IsRunning(); running {
+			if live, err := client.GetConfigs(); err == nil && live.Tun.Enable {
+				cfg.TunEnabled = true
+			}
+		}
 		if err := config.Save(paths, cfg); err != nil {
 			return err
 		}
-		fmt.Printf("Active profile set to %q\n", name)
+		fmt.Printf("%s Active profile set to %q\n", cliOnline.Render("✓"), name)
 
 		if running, _ := mgr.IsRunning(); running {
-			_ = mgr.Stop()
-			pid, err := mgr.Start()
-			if err != nil {
+			if err := config.BuildRuntimeConfig(paths, cfg); err != nil {
 				return err
 			}
-			fmt.Printf("Restarted manta (pid %d)\n", pid)
+			if err := client.ReloadConfig(paths.RuntimeFile); err != nil {
+				return fmt.Errorf("hot-reload failed: %w", err)
+			}
+			fmt.Printf("%s Hot-reloaded running daemon with profile %q\n", cliOnline.Render("✓"), name)
 		}
 		return nil
 	},
@@ -136,7 +142,7 @@ var subUpdateCmd = &cobra.Command{
 	Args:              cobra.MaximumNArgs(1),
 	ValidArgsFunction: completeProfileNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		paths, cfg, _, _, err := loadContext()
+		paths, cfg, mgr, client, err := loadContext()
 		if err != nil {
 			return err
 		}
@@ -157,12 +163,24 @@ var subUpdateCmd = &cobra.Command{
 			return err
 		}
 		cfg.Profiles[name] = newMeta
+		if running, _ := mgr.IsRunning(); running {
+			if live, err := client.GetConfigs(); err == nil && live.Tun.Enable {
+				cfg.TunEnabled = true
+			}
+		}
 		if err := config.Save(paths, cfg); err != nil {
 			return err
 		}
 		fmt.Printf("%s Updated profile %q\n", cliOnline.Render("✓"), name)
 		if q := newMeta.QuotaSummary(); q != "" {
 			fmt.Printf("  Quota: %s\n", q)
+		}
+		if name == cfg.ActiveProfile {
+			if running, _ := mgr.IsRunning(); running {
+				if err := config.BuildRuntimeConfig(paths, cfg); err == nil {
+					_ = client.ReloadConfig(paths.RuntimeFile)
+				}
+			}
 		}
 		return nil
 	},
