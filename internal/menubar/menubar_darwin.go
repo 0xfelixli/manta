@@ -913,8 +913,10 @@ func formatNodeMenuLabel(nodeName string, proxies map[string]api.ProxyInfo) stri
 	return label
 }
 
+// cleanMenuText keeps native macOS color emoji selectors (like ♻️) intact while replacing
+// the U+1F1F9 U+1F1FC pair that renders as a missing-glyph tofu box (☒) on CH/A Macs.
 func cleanMenuText(s string) string {
-	return strings.NewReplacer("\uFE0F", "", "\uFE0E", "").Replace(s)
+	return strings.ReplaceAll(s, "\U0001F1F9\U0001F1FC", "🌐")
 }
 
 func benchmarkFastestNode(client *api.Client, nodes []string) (string, int) {
