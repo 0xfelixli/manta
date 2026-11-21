@@ -97,7 +97,11 @@ var nodeListCmd = &cobra.Command{
 			}
 			for _, g := range groups {
 				p := proxies[g]
-				fmt.Printf("%-20s [%-8s] -> %s (%d nodes)\n", g, p.Type, p.Now, len(p.All))
+				kindTag := cliMuted.Render(fmt.Sprintf("[%-8s]", p.Type))
+				if p.Type == "Selector" {
+					kindTag = cliAccent.Render(fmt.Sprintf("[%-8s]", p.Type))
+				}
+				fmt.Printf("  %-20s %s  →  %s %s\n", g, kindTag, cliVal.Render(p.Now), cliMuted.Render(fmt.Sprintf("(%d)", len(p.All))))
 			}
 			return nil
 		}
@@ -108,18 +112,17 @@ var nodeListCmd = &cobra.Command{
 			return fmt.Errorf("group %q not found", groupName)
 		}
 		for _, node := range group.All {
-			mark := " "
+			mark := "  "
+			nameOut := node
 			if node == group.Now {
-				mark = "*"
+				mark = cliOnline.Render("● ")
+				nameOut = cliVal.Render(node)
 			}
-			delayStr := ""
+			delay := 0
 			if info, exists := proxies[node]; exists && len(info.History) > 0 {
-				d := info.History[len(info.History)-1].Delay
-				if d > 0 {
-					delayStr = fmt.Sprintf("(%dms)", d)
-				}
+				delay = info.History[len(info.History)-1].Delay
 			}
-			fmt.Printf("%s %-36s %s\n", mark, node, delayStr)
+			fmt.Printf("%s%-38s %s\n", mark, nameOut, renderDelayCLI(delay))
 		}
 		return nil
 	},
@@ -180,18 +183,38 @@ var nodeTestCmd = &cobra.Command{
 				sem <- struct{}{}
 				defer func() { <-sem }()
 				d, err := client.TestDelay(n, "http://www.gstatic.com/generate_204", 4000)
+				if err != nil {
+					d = -1
+				}
 				results[idx] = result{name: n, delay: d, err: err}
 			}(i, node)
 		}
 		wg.Wait()
 
-		for _, r := range results {
-			if r.err != nil {
-				fmt.Printf("%-36s timeout/err\n", r.name)
-			} else {
-				fmt.Printf("%-36s %dms\n", r.name, r.delay)
+		// Sort fastest first
+		sort.SliceStable(results, func(i, j int) bool {
+			ri, rj := results[i].delay, results[j].delay
+			if ri <= 0 {
+				ri = 1_000_000
 			}
+			if rj <= 0 {
+				rj = 1_000_000
+			}
+			return ri < rj
+		})
+
+		alive := 0
+		for _, r := range results {
+			if r.delay > 0 {
+				alive++
+			}
+			mark := "  "
+			if r.name == group.Now {
+				mark = cliOnline.Render("● ")
+			}
+			fmt.Printf("%s%-38s %s\n", mark, r.name, renderDelayCLI(r.delay))
 		}
+		fmt.Printf("\n%s\n", cliMuted.Render(fmt.Sprintf("Tested %d nodes in %s (%d alive, sorted by speed)", len(results), groupName, alive)))
 		return nil
 	},
 }

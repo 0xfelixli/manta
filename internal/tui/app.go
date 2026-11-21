@@ -407,6 +407,7 @@ type model struct {
 
 	up        int64
 	down      int64
+	peakDown  int64
 	totalUp   int64
 	totalDown int64
 	conns     []api.ConnectionItem
@@ -1226,6 +1227,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case trafficSampleMsg:
 		m.up = msg.sample.Up
 		m.down = msg.sample.Down
+		if msg.sample.Down > m.peakDown {
+			m.peakDown = msg.sample.Down
+		}
 		m.totalUp += msg.sample.Up
 		m.totalDown += msg.sample.Down
 		m.downHist = append(m.downHist, msg.sample.Down)
@@ -2055,7 +2059,11 @@ func (m model) renderDashboard(totalW, bodyH int) string {
 		speedDownStyle.Render("↓"+formatBytes(m.totalDown)),
 		dimStyle.Render(fmt.Sprintf("• 127.0.0.1:%d", m.cfg.MixedPort)),
 	)
-	spark := renderSparkline(m.downHist, trW-16)
+	spark := renderSparkline(m.downHist, trW-28)
+	peakLabel := ""
+	if m.peakDown > 0 {
+		peakLabel = " " + dimStyle.Render("peak "+formatSpeed(m.peakDown))
+	}
 	checkIPBtn := zone.Mark("ctl:checkip", miniBtnStyle.Render("Check IP"))
 
 	c2Lines := []string{
@@ -2066,7 +2074,7 @@ func (m model) renderDashboard(totalW, bodyH int) string {
 		kvLine("ISP", ispVal, trW),
 		kvLine("Main Route", routeVal, trW),
 		kvLine("Session", totalsVal, trW),
-		kvLine("Speed Graph", speedDownStyle.Render(spark), trW),
+		kvLine("Speed Graph", speedDownStyle.Render(spark)+peakLabel, trW),
 	}
 	card2 := cardStyle.Width(rightHalfW).Height(topInnerH).MaxHeight(topInnerH + 2).Render(strings.Join(c2Lines, "\n"))
 
@@ -2269,25 +2277,29 @@ func formatBytes(b int64) string {
 func formatDelayStyled(ms int) string {
 	switch {
 	case ms < 0:
-		return delayBadStyle.Render("timeout")
+		return delayBadStyle.Render("▫▫▫ timeout")
 	case ms == 0:
-		return dimStyle.Render("   -   ")
+		return dimStyle.Render("          -")
 	case ms < 150:
-		return delayGoodStyle.Render(fmt.Sprintf("%4dms", ms))
+		return delayGoodStyle.Render(fmt.Sprintf("▪▪▪ %5dms", ms))
 	case ms < 400:
-		return delayMedStyle.Render(fmt.Sprintf("%4dms", ms))
+		return delayMedStyle.Render(fmt.Sprintf("▪▪▫ %5dms", ms))
 	default:
-		return delayBadStyle.Render(fmt.Sprintf("%4dms", ms))
+		return delayBadStyle.Render(fmt.Sprintf("▪▫▫ %5dms", ms))
 	}
 }
 
 func formatDelayPlain(ms int) string {
 	switch {
 	case ms < 0:
-		return "timeout"
+		return "▫▫▫ timeout"
 	case ms == 0:
-		return "   -   "
+		return "          -"
+	case ms < 150:
+		return fmt.Sprintf("▪▪▪ %5dms", ms)
+	case ms < 400:
+		return fmt.Sprintf("▪▪▫ %5dms", ms)
 	default:
-		return fmt.Sprintf("%4dms", ms)
+		return fmt.Sprintf("▪▫▫ %5dms", ms)
 	}
 }

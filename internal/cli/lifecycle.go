@@ -54,14 +54,15 @@ var initCmd = &cobra.Command{
 		if err := config.Save(paths, cfg); err != nil {
 			return err
 		}
-		fmt.Printf("Initialized config at %s\n", paths.ConfigFile)
-		fmt.Printf("Local HTTP/SOCKS5 inbound: 127.0.0.1:%d\n", cfg.MixedPort)
-		fmt.Printf("Controller API:            http://%s\n", cfg.Controller)
+		fmt.Printf("%s  %s\n", cliBadge.Render("MANTA"), cliOnline.Render("✓ Initialized"))
+		fmt.Println(renderKV("Config", paths.ConfigFile))
+		fmt.Println(renderKV("Inbound", fmt.Sprintf("127.0.0.1:%d (HTTP + SOCKS5)", cfg.MixedPort)))
+		fmt.Println(renderKV("Controller", "http://"+cfg.Controller))
 
 		if bin, err := mgr.FindBinary(); err == nil {
-			fmt.Printf("Detected mihomo binary:    %s\n", bin)
+			fmt.Println(renderKV("Engine", bin))
 		} else {
-			fmt.Printf("Warning: %v\n", err)
+			fmt.Println(renderKV("Engine", cliWarn.Render(err.Error())))
 		}
 
 		// Auto-install fish shell completions if ~/.config/fish exists.
@@ -72,7 +73,7 @@ var initCmd = &cobra.Command{
 				if err := os.MkdirAll(compDir, 0o755); err == nil {
 					compFile := filepath.Join(compDir, "manta.fish")
 					if err := rootCmd.GenFishCompletionFile(compFile, true); err == nil {
-						fmt.Printf("Fish completions:          %s\n", compFile)
+						fmt.Println(renderKV("Fish Comp", compFile))
 					}
 				}
 			}
@@ -169,40 +170,44 @@ var statusCmd = &cobra.Command{
 		}
 		running, pid := mgr.IsRunning()
 		if !running {
-			fmt.Println("Status:  stopped")
-			fmt.Printf("Profile: %s\n", emptyOr(cfg.ActiveProfile, "(none)"))
+			fmt.Printf("%s  %s\n", cliBadge.Render("MANTA"), cliOffline.Render("○ STOPPED"))
+			fmt.Println(renderKV("Profile", emptyOr(cfg.ActiveProfile, "(none)")))
 			return nil
 		}
 
-		fmt.Printf("Status:  running (pid %d)\n", pid)
-		fmt.Printf("Profile: %s\n", emptyOr(cfg.ActiveProfile, "(default direct)"))
-		fmt.Printf("Inbound: http://127.0.0.1:%d | socks5://127.0.0.1:%d\n", cfg.MixedPort, cfg.MixedPort)
-		fmt.Printf("API:     http://%s\n", cfg.Controller)
-
+		verStr := "embedded"
 		if ver, err := client.Version(); err == nil {
-			fmt.Printf("Core:    mihomo %s\n", ver.Version)
+			verStr = "mihomo " + ver.Version
 		}
+		fmt.Printf("%s  %s  %s\n", cliBadge.Render("MANTA"), cliOnline.Render("● ONLINE"), cliMuted.Render(fmt.Sprintf("(pid %d • %s)", pid, verStr)))
+		fmt.Println(renderKV("Profile", cliVal.Render(emptyOr(cfg.ActiveProfile, "(default direct)"))))
 		if live, err := client.GetConfigs(); err == nil {
-			fmt.Printf("Mode:    %s\n", live.Mode)
+			fmt.Println(renderKV("Mode", cliAccent.Render(strings.ToUpper(live.Mode))))
 			if live.Tun.Enable {
-				fmt.Printf("TUN:     enabled (%s)\n", emptyOr(live.Tun.Stack, "mixed"))
+				fmt.Println(renderKV("TUN", cliOnline.Render("● ON")+" "+cliMuted.Render("("+emptyOr(live.Tun.Stack, "mixed")+")")))
 			} else {
-				fmt.Println("TUN:     disabled")
+				fmt.Println(renderKV("TUN", cliMuted.Render("○ OFF")))
 			}
 		}
 		if runtime.GOOS == "darwin" {
 			if services, err := sysproxy.ResolveServices(""); err == nil {
 				if sts, err := sysproxy.Status(services); err == nil && len(sts) > 0 {
-					fmt.Printf("SysProxy: %s [%s]\n", sts[0].HTTP, sts[0].Service)
+					if strings.HasPrefix(sts[0].HTTP, "on ") {
+						fmt.Println(renderKV("SysProxy", cliOnline.Render("● ON")+" "+cliMuted.Render(fmt.Sprintf("[%s • 127.0.0.1:%d]", sts[0].Service, cfg.MixedPort))))
+					} else {
+						fmt.Println(renderKV("SysProxy", cliMuted.Render("○ OFF ["+sts[0].Service+"]")))
+					}
 				}
 			}
 		}
+		fmt.Println(renderKV("Inbound", fmt.Sprintf("http://127.0.0.1:%d  •  socks5://127.0.0.1:%d", cfg.MixedPort, cfg.MixedPort)))
+		fmt.Println(renderKV("Controller", "http://"+cfg.Controller))
 		if statusWithIP {
 			if info, err := api.FetchExitIP(cfg.MixedPort); err == nil {
-				loc := strings.TrimSpace(strings.Join([]string{info.Country, info.City}, " "))
-				fmt.Printf("Exit IP: %s (%s • %s)\n", info.IP, loc, info.ISP)
+				loc := strings.TrimSpace(strings.Join([]string{info.Country, info.City}, ", "))
+				fmt.Println(renderKV("Exit IP", cliVal.Render(info.IP)+" "+cliMuted.Render(fmt.Sprintf("(%s • %s)", loc, info.ISP))))
 			} else {
-				fmt.Printf("Exit IP: lookup failed (%v)\n", err)
+				fmt.Println(renderKV("Exit IP", cliOffline.Render("lookup failed: "+err.Error())))
 			}
 		}
 		return nil

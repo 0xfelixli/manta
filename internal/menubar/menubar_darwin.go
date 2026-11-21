@@ -3,8 +3,13 @@
 package menubar
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
+	"math"
 	"os"
 	"os/exec"
 	"sort"
@@ -22,12 +27,67 @@ import (
 
 const maxQuickNodes = 25
 
+// mantaTemplateIconPNG renders a crisp 22x22 monochrome Manta Ray silhouette PNG
+// for macOS NSStatusBar template icon mode (auto-adapts to light/dark menu bars).
+func mantaTemplateIconPNG() []byte {
+	const size = 22
+	img := image.NewNRGBA(image.Rect(0, 0, size, size))
+	cx := float64(size-1) / 2.0
+
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			dx := math.Abs(float64(x) - cx)
+			fy := float64(y)
+
+			// Manta ray wing silhouette: wide diamond wings curving gracefully into a slender tail.
+			inBody := false
+			switch {
+			case fy >= 3 && fy <= 5:
+				// Cephalic fins (two small front horns) + head notch
+				if dx >= 1.2 && dx <= 3.2 {
+					inBody = true
+				}
+			case fy > 5 && fy <= 11:
+				// Expanding wingspan
+				t := (fy - 5.0) / 6.0
+				maxW := 2.2 + t*7.8
+				if dx <= maxW {
+					inBody = true
+				}
+			case fy > 11 && fy <= 15:
+				// Swept-back trailing edge with curved wing cutouts
+				t := (fy - 11.0) / 4.0
+				maxW := 10.0 * (1.0 - t*0.82)
+				if dx <= maxW {
+					inBody = true
+				}
+			case fy > 15 && fy <= 19:
+				// Slender tail
+				if dx <= 0.75 {
+					inBody = true
+				}
+			}
+
+			if inBody {
+				img.SetNRGBA(x, y, color.NRGBA{R: 0, G: 0, B: 0, A: 235})
+			}
+		}
+	}
+
+	var buf bytes.Buffer
+	_ = png.Encode(&buf, img)
+	return buf.Bytes()
+}
+
 // Run starts the macOS menu bar status item (blocks on the Cocoa main thread).
 func Run(cfg *config.AppConfig, mgr *core.Manager, client *api.Client) error {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	onReady := func() {
-		systray.SetTitle("● Manta")
+		if icon := mantaTemplateIconPNG(); len(icon) > 0 {
+			systray.SetTemplateIcon(icon, icon)
+		}
+		systray.SetTitle("Manta")
 		systray.SetTooltip("Manta Proxy Manager")
 
 		// Status info items (disabled)
@@ -91,22 +151,22 @@ func Run(cfg *config.AppConfig, mgr *core.Manager, client *api.Client) error {
 			mu.Unlock()
 
 			if !isOnline {
-				systray.SetTitle("○ Manta")
+				systray.SetTitle("OFF")
 				return
 			}
 			// Show live speed when traffic >= 1 KB/s, otherwise show compact country/online badge.
 			if down >= 1024 || up >= 1024 {
 				if down >= up {
-					systray.SetTitle("● ↓" + compactSpeed(down))
+					systray.SetTitle("↓" + compactSpeed(down))
 				} else {
-					systray.SetTitle("● ↑" + compactSpeed(up))
+					systray.SetTitle("↑" + compactSpeed(up))
 				}
 				return
 			}
 			if cc != "" {
-				systray.SetTitle("● " + cc)
+				systray.SetTitle(cc)
 			} else {
-				systray.SetTitle("● Manta")
+				systray.SetTitle("")
 			}
 		}
 
