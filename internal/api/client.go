@@ -10,8 +10,34 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
+
+var (
+	proxyTransportMu sync.Mutex
+	proxyTransports  = make(map[int]*http.Transport)
+)
+
+func getProxyTransport(mixedPort int) (*http.Transport, error) {
+	proxyTransportMu.Lock()
+	defer proxyTransportMu.Unlock()
+	if tr, ok := proxyTransports[mixedPort]; ok {
+		return tr, nil
+	}
+	proxyURL, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", mixedPort))
+	if err != nil {
+		return nil, err
+	}
+	tr := &http.Transport{
+		Proxy:               http.ProxyURL(proxyURL),
+		MaxIdleConns:        16,
+		MaxIdleConnsPerHost: 8,
+		IdleConnTimeout:     60 * time.Second,
+	}
+	proxyTransports[mixedPort] = tr
+	return tr, nil
+}
 
 // Client talks to mihomo's External Controller REST API.
 type Client struct {
@@ -122,10 +148,18 @@ func NewClient(controller, secret string) *Client {
 		base = "http://" + base
 	}
 	base = strings.TrimRight(base, "/")
+	tr := &http.Transport{
+		MaxIdleConns:        32,
+		MaxIdleConnsPerHost: 32,
+		IdleConnTimeout:     90 * time.Second,
+	}
 	return &Client{
 		BaseURL: base,
 		Secret:  secret,
-		HTTP:    &http.Client{Timeout: 8 * time.Second},
+		HTTP: &http.Client{
+			Timeout:   8 * time.Second,
+			Transport: tr,
+		},
 	}
 }
 
@@ -196,75 +230,121 @@ func (c *Client) GetConnections() (*ConnectionsSummary, error) {
 	return &res, nil
 }
 
-// FetchExitIP queries the current exit IP & geolocation via manta's local HTTP proxy.
+// FetchExitIP queries the current exit IP & geolocation via manta's local HTTP proxy
+// using concurrent Happy Eyeballs racing across multiple GeoIP endpoints and a pooled Transport.
 func FetchExitIP(mixedPort int) (*ExitIPInfo, error) {
-	proxyURL, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", mixedPort))
+	tr, err := getProxyTransport(mixedPort)
 	if err != nil {
 		return nil, err
 	}
 	httpClient := &http.Client{
-		Timeout: 6 * time.Second,
-		Transport: &http.Transport{
-			Proxy: http.ProxyURL(proxyURL),
-		},
+		Timeout:   5 * time.Second,
+		Transport: tr,
 	}
 
-	// Primary: ip-api.com (fast, concise JSON)
-	req, err := http.NewRequest(http.MethodGet, "http://ip-api.com/json/?fields=status,country,countryCode,regionName,city,isp,query", nil)
-	if err == nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	type res struct {
+		info *ExitIPInfo
+		err  error
+	}
+	ch := make(chan res, 2)
+
+	// Endpoint 1: ip-api.com (fast JSON)
+	go func() {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://ip-api.com/json/?fields=status,country,countryCode,regionName,city,isp,query", nil)
+		if err != nil {
+			ch <- res{err: err}
+			return
+		}
 		resp, err := httpClient.Do(req)
-		if err == nil {
-			defer resp.Body.Close()
-			var r struct {
-				Status      string `json:"status"`
-				Country     string `json:"country"`
-				CountryCode string `json:"countryCode"`
-				RegionName  string `json:"regionName"`
-				City        string `json:"city"`
-				ISP         string `json:"isp"`
-				Query       string `json:"query"`
-			}
-			if json.NewDecoder(resp.Body).Decode(&r) == nil && r.Status == "success" && r.Query != "" {
-				return &ExitIPInfo{
-					IP:          r.Query,
-					Country:     r.Country,
-					CountryCode: r.CountryCode,
-					Region:      r.RegionName,
-					City:        r.City,
-					ISP:         r.ISP,
-				}, nil
-			}
+		if err != nil {
+			ch <- res{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		var r struct {
+			Status      string `json:"status"`
+			Country     string `json:"country"`
+			CountryCode string `json:"countryCode"`
+			RegionName  string `json:"regionName"`
+			City        string `json:"city"`
+			ISP         string `json:"isp"`
+			Query       string `json:"query"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&r); err != nil || r.Status != "success" || r.Query == "" {
+			ch <- res{err: fmt.Errorf("ip-api invalid response")}
+			return
+		}
+		ch <- res{info: &ExitIPInfo{
+			IP:          r.Query,
+			Country:     r.Country,
+			CountryCode: r.CountryCode,
+			Region:      r.RegionName,
+			City:        r.City,
+			ISP:         r.ISP,
+		}}
+	}()
+
+	// Endpoint 2: ipwho.is (HTTPS fallback, 150ms staggered Happy Eyeballs start)
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(150 * time.Millisecond):
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://ipwho.is/", nil)
+		if err != nil {
+			ch <- res{err: err}
+			return
+		}
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			ch <- res{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		var fb struct {
+			Success     bool   `json:"success"`
+			IP          string `json:"ip"`
+			Country     string `json:"country"`
+			CountryCode string `json:"country_code"`
+			Region      string `json:"region"`
+			City        string `json:"city"`
+			Connection  struct {
+				ISP string `json:"isp"`
+			} `json:"connection"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&fb); err != nil || !fb.Success || fb.IP == "" {
+			ch <- res{err: fmt.Errorf("ipwho.is invalid response")}
+			return
+		}
+		ch <- res{info: &ExitIPInfo{
+			IP:          fb.IP,
+			Country:     fb.Country,
+			CountryCode: fb.CountryCode,
+			Region:      fb.Region,
+			City:        fb.City,
+			ISP:         fb.Connection.ISP,
+		}}
+	}()
+
+	var lastErr error
+	for i := 0; i < 2; i++ {
+		r := <-ch
+		if r.info != nil {
+			cancel()
+			return r.info, nil
+		}
+		if r.err != nil {
+			lastErr = r.err
 		}
 	}
-
-	// Fallback: ipwho.is
-	resp, err := httpClient.Get("https://ipwho.is/")
-	if err != nil {
-		return nil, fmt.Errorf("exit IP lookup failed: %w", err)
+	if lastErr == nil {
+		lastErr = fmt.Errorf("exit IP lookup failed")
 	}
-	defer resp.Body.Close()
-	var fb struct {
-		Success     bool   `json:"success"`
-		IP          string `json:"ip"`
-		Country     string `json:"country"`
-		CountryCode string `json:"country_code"`
-		Region      string `json:"region"`
-		City        string `json:"city"`
-		Connection  struct {
-			ISP string `json:"isp"`
-		} `json:"connection"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&fb); err != nil || !fb.Success || fb.IP == "" {
-		return nil, fmt.Errorf("failed to parse exit IP response")
-	}
-	return &ExitIPInfo{
-		IP:          fb.IP,
-		Country:     fb.Country,
-		CountryCode: fb.CountryCode,
-		Region:      fb.Region,
-		City:        fb.City,
-		ISP:         fb.Connection.ISP,
-	}, nil
+	return nil, lastErr
 }
 
 // SetMode switches between rule, global, and direct modes without restarting.

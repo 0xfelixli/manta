@@ -315,9 +315,11 @@ func BuildRuntimeConfig(p Paths, cfg *AppConfig) error {
 	}
 
 	// High-performance mihomo data-plane defaults:
+	// - log-level: warning (eliminates per-connection disk I/O & string formatting overhead)
 	// - tcp-concurrent: dial all resolved IPs concurrently and pick the lowest-latency handshake
 	// - unified-delay: normalize latency measurement across protocols
 	// - profile.store-fake-ip & store-selected: persist Fake-IP mapping and node selection across restarts
+	doc["log-level"] = "warning"
 	if _, exists := doc["tcp-concurrent"]; !exists {
 		doc["tcp-concurrent"] = true
 	}

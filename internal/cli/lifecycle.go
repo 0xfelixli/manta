@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -270,7 +271,17 @@ var logsCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		data, err := os.ReadFile(paths.LogFile)
+		f, err := os.Open(paths.LogFile)
+		if err != nil {
+			return fmt.Errorf("read log file: %w", err)
+		}
+		defer f.Close()
+
+		const tailCap = 32 << 10 // Read at most last 32 KB (O(1) memory)
+		if st, err := f.Stat(); err == nil && st.Size() > tailCap {
+			_, _ = f.Seek(-tailCap, io.SeekEnd)
+		}
+		data, err := io.ReadAll(f)
 		if err != nil {
 			return fmt.Errorf("read log file: %w", err)
 		}

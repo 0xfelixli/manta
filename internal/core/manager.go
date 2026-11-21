@@ -80,6 +80,7 @@ func (m *Manager) Start() (int, error) {
 		return 0, err
 	}
 
+	rotateLogIfNeeded(m.Paths.LogFile, 2<<20, 256<<10)
 	logFile, err := os.OpenFile(m.Paths.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return 0, fmt.Errorf("open log file: %w", err)
@@ -291,4 +292,26 @@ func (m *Manager) StartTunElevated() (int, error) {
 
 func escapeSingleQuotes(s string) string {
 	return strings.ReplaceAll(s, "'", "'\\''")
+}
+
+// rotateLogIfNeeded truncates logPath to its last keepBytes when its size exceeds maxBytes.
+func rotateLogIfNeeded(logPath string, maxBytes, keepBytes int64) {
+	st, err := os.Stat(logPath)
+	if err != nil || st.Size() <= maxBytes {
+		return
+	}
+	f, err := os.Open(logPath)
+	if err != nil {
+		return
+	}
+	tail := make([]byte, keepBytes)
+	_, readErr := f.ReadAt(tail, st.Size()-keepBytes)
+	_ = f.Close()
+	if readErr != nil {
+		return
+	}
+	if idx := strings.IndexByte(string(tail), '\n'); idx >= 0 && idx+1 < len(tail) {
+		tail = tail[idx+1:]
+	}
+	_ = os.WriteFile(logPath, tail, 0o644)
 }

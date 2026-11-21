@@ -82,7 +82,7 @@ func RunEmbeddedDaemon(homeDir, configFile string) error {
 	signal.Notify(termSign, syscall.SIGINT, syscall.SIGTERM)
 	signal.Notify(hupSign, syscall.SIGHUP)
 
-	ticker := time.NewTicker(250 * time.Millisecond)
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	for {

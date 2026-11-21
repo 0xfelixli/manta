@@ -60,16 +60,18 @@ type stateLoadedMsg struct {
 	proxies    map[string]api.ProxyInfo
 	sysProxyOn bool
 	conns      []api.ConnectionItem
+	connsCount int
 	totalUp    int64
 	totalDown  int64
 	err        error
 }
 
 type connsPollMsg struct {
-	conns     []api.ConnectionItem
-	totalUp   int64
-	totalDown int64
-	liveCfg   *api.ConfigsResp
+	conns      []api.ConnectionItem
+	connsCount int
+	totalUp    int64
+	totalDown  int64
+	liveCfg    *api.ConfigsResp
 }
 
 type exitIPLoadedMsg struct {
@@ -407,13 +409,14 @@ type model struct {
 	autostartOn bool
 	sortByFast  bool
 
-	up        int64
-	down      int64
-	peakDown  int64
-	totalUp   int64
-	totalDown int64
-	conns     []api.ConnectionItem
-	downHist  []int64
+	up         int64
+	down       int64
+	peakDown   int64
+	totalUp    int64
+	totalDown  int64
+	conns      []api.ConnectionItem
+	connsCount int
+	downHist   []int64
 
 	exitIP     *api.ExitIPInfo
 	exitIPErr  string
@@ -548,13 +551,30 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(m.loadStateCmd(), m.fetchExitIPCmd(), m.startTrafficCmd(), m.pollConnsTickCmd(), m.spin.Tick)
 }
 
+func sortAndCapConns(items []api.ConnectionItem, limit int) ([]api.ConnectionItem, int) {
+	total := len(items)
+	if total == 0 {
+		return nil, 0
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		return (items[i].Download + items[i].Upload) > (items[j].Download + items[j].Upload)
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items, total
+}
+
 func (m model) pollConnsTickCmd() tea.Cmd {
+	onDashboard := m.activeTab == tabDashboard
 	return tea.Tick(2*time.Second, func(time.Time) tea.Msg {
 		var msg connsPollMsg
-		if conns, err := m.client.GetConnections(); err == nil {
-			msg.conns = conns.Connections
-			msg.totalUp = conns.UploadTotal
-			msg.totalDown = conns.DownloadTotal
+		if onDashboard {
+			if conns, err := m.client.GetConnections(); err == nil {
+				msg.conns, msg.connsCount = sortAndCapConns(conns.Connections, 30)
+				msg.totalUp = conns.UploadTotal
+				msg.totalDown = conns.DownloadTotal
+			}
 		}
 		if live, err := m.client.GetConfigs(); err == nil {
 			msg.liveCfg = live
@@ -582,9 +602,10 @@ func (m model) loadStateCmd() tea.Cmd {
 			return stateLoadedMsg{err: err}
 		}
 		var conns []api.ConnectionItem
+		var connsCount int
 		var totalUp, totalDown int64
 		if summary, err := m.client.GetConnections(); err == nil {
-			conns = summary.Connections
+			conns, connsCount = sortAndCapConns(summary.Connections, 30)
 			totalUp = summary.UploadTotal
 			totalDown = summary.DownloadTotal
 		}
@@ -597,6 +618,7 @@ func (m model) loadStateCmd() tea.Cmd {
 			proxies:    proxies,
 			sysProxyOn: detectSysProxy(),
 			conns:      conns,
+			connsCount: connsCount,
 			totalUp:    totalUp,
 			totalDown:  totalDown,
 		}
@@ -1124,6 +1146,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tunStack = msg.tunStack
 		m.sysProxyOn = msg.sysProxyOn
 		m.conns = msg.conns
+		m.connsCount = msg.connsCount
 		m.totalUp = msg.totalUp
 		m.totalDown = msg.totalDown
 		m.proxies = msg.proxies
@@ -1217,10 +1240,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case connsPollMsg:
-		if msg.conns != nil {
+		if msg.conns != nil || msg.connsCount == 0 && m.activeTab == tabDashboard {
 			m.conns = msg.conns
-			m.totalUp = msg.totalUp
-			m.totalDown = msg.totalDown
+			m.connsCount = msg.connsCount
+			if msg.totalUp > 0 || msg.totalDown > 0 {
+				m.totalUp = msg.totalUp
+				m.totalDown = msg.totalDown
+			}
 		}
 		if msg.liveCfg != nil {
 			m.online = true
@@ -2129,7 +2155,7 @@ func (m model) renderDashboard(totalW, bodyH int) string {
 		brCap = 1
 	}
 	closeConnsBtn := zone.Mark("ctl:closeconns", miniBtnStyle.Render("Close All"))
-	brHeaderRight := dimStyle.Render(fmt.Sprintf("%d active ", len(m.conns))) + closeConnsBtn
+	brHeaderRight := dimStyle.Render(fmt.Sprintf("%d active ", m.connsCount)) + closeConnsBtn
 	brLines := []string{
 		joinLeftRight(cardTitleStyle.Render("Live Connections"), brHeaderRight, brInnerW),
 		dimStyle.Render(strings.Repeat("─", brInnerW)),
@@ -2137,12 +2163,7 @@ func (m model) renderDashboard(totalW, bodyH int) string {
 	if len(m.conns) == 0 {
 		brLines = append(brLines, dimStyle.Render("(no active connections)"))
 	} else {
-		sorted := make([]api.ConnectionItem, len(m.conns))
-		copy(sorted, m.conns)
-		sort.SliceStable(sorted, func(i, j int) bool {
-			return (sorted[i].Download + sorted[i].Upload) > (sorted[j].Download + sorted[j].Upload)
-		})
-		for i, c := range sorted {
+		for i, c := range m.conns {
 			if i >= brCap {
 				break
 			}
