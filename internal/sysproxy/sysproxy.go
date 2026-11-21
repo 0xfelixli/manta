@@ -8,6 +8,14 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
+)
+
+var (
+	servicesCacheMu   sync.Mutex
+	cachedServices    []string
+	servicesCacheTime time.Time
 )
 
 var defaultBypassDomains = []string{
@@ -50,12 +58,44 @@ func runNetworkSetup(args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
+// FastIsEnabled queries macOS `scutil --proxy` in a single lightweight Mach IPC call (~2ms)
+// instead of spawning 8-12 `networksetup` subprocesses across all network interfaces.
+func FastIsEnabled() bool {
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+	out, err := exec.Command("scutil", "--proxy").Output()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "HTTPEnable :") ||
+			strings.HasPrefix(line, "HTTPSEnable :") ||
+			strings.HasPrefix(line, "SOCKSEnable :") {
+			if strings.HasSuffix(line, " 1") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // ActiveServices returns enabled macOS network services that currently have an IP address.
 // Falls back to "Wi-Fi" if present when no active IP is detected.
 func ActiveServices() ([]string, error) {
 	if err := ensureDarwin(); err != nil {
 		return nil, err
 	}
+	servicesCacheMu.Lock()
+	if len(cachedServices) > 0 && time.Since(servicesCacheTime) < 30*time.Second {
+		res := make([]string, len(cachedServices))
+		copy(res, cachedServices)
+		servicesCacheMu.Unlock()
+		return res, nil
+	}
+	servicesCacheMu.Unlock()
+
 	out, err := runNetworkSetup("-listallnetworkservices")
 	if err != nil {
 		return nil, err
@@ -87,18 +127,31 @@ func ActiveServices() ([]string, error) {
 		}
 	}
 
+	var chosen []string
 	if len(active) > 0 {
-		return active, nil
-	}
-	for _, svc := range all {
-		if svc == "Wi-Fi" {
-			return []string{"Wi-Fi"}, nil
+		chosen = active
+	} else {
+		for _, svc := range all {
+			if svc == "Wi-Fi" {
+				chosen = []string{"Wi-Fi"}
+				break
+			}
 		}
 	}
-	if len(all) == 0 {
-		return nil, errors.New("no enabled macOS network services found")
+	if len(chosen) == 0 {
+		if len(all) == 0 {
+			return nil, errors.New("no enabled macOS network services found")
+		}
+		chosen = all[:1]
 	}
-	return all[:1], nil
+
+	servicesCacheMu.Lock()
+	cachedServices = make([]string, len(chosen))
+	copy(cachedServices, chosen)
+	servicesCacheTime = time.Now()
+	servicesCacheMu.Unlock()
+
+	return chosen, nil
 }
 
 // ResolveServices returns the user-specified service or auto-detected active services.

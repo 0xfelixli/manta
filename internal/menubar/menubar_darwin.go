@@ -133,14 +133,27 @@ func Run(cfg *config.AppConfig, mgr *core.Manager, client *api.Client) error {
 		mQuit := systray.AddMenuItem("Close Menu Bar Icon", "Close menu bar item (keeps proxy running)")
 
 		var (
-			mu           sync.Mutex
-			online       bool
-			countryCode  string
-			primaryGroup string
-			sysOn        bool
-			curUp        int64
-			curDown      int64
+			mu            sync.Mutex
+			online        bool
+			countryCode   string
+			primaryGroup  string
+			sysOn         bool
+			curUp         int64
+			curDown       int64
+			lastBarTitle  string
+			lastSpeedText string
 		)
+
+		setBarTitle := func(title string) {
+			mu.Lock()
+			if title == lastBarTitle {
+				mu.Unlock()
+				return
+			}
+			lastBarTitle = title
+			mu.Unlock()
+			systray.SetTitle(title)
+		}
 
 		updateTitle := func() {
 			mu.Lock()
@@ -151,22 +164,22 @@ func Run(cfg *config.AppConfig, mgr *core.Manager, client *api.Client) error {
 			mu.Unlock()
 
 			if !isOnline {
-				systray.SetTitle("OFF")
+				setBarTitle("OFF")
 				return
 			}
 			// Show live speed when traffic >= 1 KB/s, otherwise show compact country/online badge.
 			if down >= 1024 || up >= 1024 {
 				if down >= up {
-					systray.SetTitle("↓" + compactSpeed(down))
+					setBarTitle("↓" + compactSpeed(down))
 				} else {
-					systray.SetTitle("↑" + compactSpeed(up))
+					setBarTitle("↑" + compactSpeed(up))
 				}
 				return
 			}
 			if cc != "" {
-				systray.SetTitle(cc)
+				setBarTitle(cc)
 			} else {
-				systray.SetTitle("")
+				setBarTitle("")
 			}
 		}
 
@@ -294,11 +307,18 @@ func Run(cfg *config.AppConfig, mgr *core.Manager, client *api.Client) error {
 					continue
 				}
 				for sample := range ch {
+					speedText := fmt.Sprintf("Traffic: ↑ %s/s  ↓ %s/s", formatBytes(sample.Up), formatBytes(sample.Down))
 					mu.Lock()
 					curUp = sample.Up
 					curDown = sample.Down
+					changed := speedText != lastSpeedText
+					if changed {
+						lastSpeedText = speedText
+					}
 					mu.Unlock()
-					mSpeed.SetTitle(fmt.Sprintf("Traffic: ↑ %s/s  ↓ %s/s", formatBytes(sample.Up), formatBytes(sample.Down)))
+					if changed {
+						mSpeed.SetTitle(speedText)
+					}
 					updateTitle()
 				}
 				time.Sleep(2 * time.Second)
@@ -390,20 +410,7 @@ func setCheck(item *systray.MenuItem, checked bool) {
 }
 
 func detectSysProxy() bool {
-	services, err := sysproxy.ResolveServices("")
-	if err != nil || len(services) == 0 {
-		return false
-	}
-	statuses, err := sysproxy.Status(services)
-	if err != nil {
-		return false
-	}
-	for _, st := range statuses {
-		if strings.HasPrefix(st.HTTP, "on ") || strings.HasPrefix(st.SOCKS, "on ") {
-			return true
-		}
-	}
-	return false
+	return sysproxy.FastIsEnabled()
 }
 
 func pickPrimaryGroup(proxies map[string]api.ProxyInfo) (string, api.ProxyInfo) {

@@ -314,6 +314,28 @@ func BuildRuntimeConfig(p Paths, cfg *AppConfig) error {
 		delete(doc, "secret")
 	}
 
+	// High-performance mihomo data-plane defaults:
+	// - tcp-concurrent: dial all resolved IPs concurrently and pick the lowest-latency handshake
+	// - unified-delay: normalize latency measurement across protocols
+	// - profile.store-fake-ip & store-selected: persist Fake-IP mapping and node selection across restarts
+	if _, exists := doc["tcp-concurrent"]; !exists {
+		doc["tcp-concurrent"] = true
+	}
+	if _, exists := doc["unified-delay"]; !exists {
+		doc["unified-delay"] = true
+	}
+	profileMap, ok := doc["profile"].(map[string]any)
+	if !ok || profileMap == nil {
+		profileMap = make(map[string]any)
+	}
+	if _, exists := profileMap["store-selected"]; !exists {
+		profileMap["store-selected"] = true
+	}
+	if _, exists := profileMap["store-fake-ip"]; !exists {
+		profileMap["store-fake-ip"] = true
+	}
+	doc["profile"] = profileMap
+
 	// Prepend user custom override rules ahead of subscription rules.
 	if len(cfg.CustomRules) > 0 {
 		mergedRules := make([]any, 0, len(cfg.CustomRules))
@@ -328,6 +350,13 @@ func BuildRuntimeConfig(p Paths, cfg *AppConfig) error {
 			}
 		}
 		doc["rules"] = mergedRules
+	}
+
+	// Disable per-connection macOS proc_pidinfo syscall lookup when no PROCESS-NAME/PROCESS-PATH rules exist.
+	if _, exists := doc["find-process-mode"]; !exists {
+		if !hasProcessRules(doc["rules"]) {
+			doc["find-process-mode"] = "off"
+		}
 	}
 
 	if cfg.TunEnabled {
@@ -350,11 +379,30 @@ func BuildRuntimeConfig(p Paths, cfg *AppConfig) error {
 		if _, exists := dnsMap["fake-ip-range"]; !exists {
 			dnsMap["fake-ip-range"] = "198.18.0.1/16"
 		}
-		if _, exists := dnsMap["nameserver"]; !exists {
-			dnsMap["nameserver"] = []string{"223.5.5.5", "119.29.29.29"}
+		if _, exists := dnsMap["fake-ip-filter"]; !exists {
+			dnsMap["fake-ip-filter"] = []string{
+				"*.lan",
+				"*.local",
+				"localhost.ptlogin2.qq.com",
+				"+.srv.nintendo.net",
+				"+.stun.playstation.net",
+				"xbox.*.microsoft.com",
+				"+.xboxlive.com",
+				"*.msftconnecttest.com",
+				"*.msftncsi.com",
+				"time.*.com",
+				"time.*.gov",
+				"time.*.apple.com",
+				"ntp.*.com",
+				"stun.*.*",
+				"stun.*.*.*",
+			}
 		}
-		if _, exists := dnsMap["fallback"]; !exists {
-			dnsMap["fallback"] = []string{"https://dns.google/dns-query", "https://cloudflare-dns.com/dns-query"}
+		if _, exists := dnsMap["default-nameserver"]; !exists {
+			dnsMap["default-nameserver"] = []string{"223.5.5.5", "119.29.29.29"}
+		}
+		if _, exists := dnsMap["nameserver"]; !exists {
+			dnsMap["nameserver"] = []string{"https://223.5.5.5/dns-query", "https://1.12.12.12/dns-query", "223.5.5.5"}
 		}
 		doc["dns"] = dnsMap
 	} else {
@@ -370,4 +418,26 @@ func BuildRuntimeConfig(p Paths, cfg *AppConfig) error {
 	}
 	fixOwner(p.RuntimeFile)
 	return nil
+}
+
+func hasProcessRules(rulesAny any) bool {
+	checkRule := func(r string) bool {
+		u := strings.ToUpper(strings.TrimSpace(r))
+		return strings.HasPrefix(u, "PROCESS-NAME,") || strings.HasPrefix(u, "PROCESS-PATH,")
+	}
+	switch rules := rulesAny.(type) {
+	case []any:
+		for _, item := range rules {
+			if s, ok := item.(string); ok && checkRule(s) {
+				return true
+			}
+		}
+	case []string:
+		for _, s := range rules {
+			if checkRule(s) {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -397,14 +397,15 @@ type model struct {
 
 	activeTab tabView
 
-	online     bool
-	version    string
-	mode       string
-	allowLan   bool
-	tunOn      bool
-	tunStack   string
-	sysProxyOn bool
-	sortByFast bool
+	online      bool
+	version     string
+	mode        string
+	allowLan    bool
+	tunOn       bool
+	tunStack    string
+	sysProxyOn  bool
+	autostartOn bool
+	sortByFast  bool
 
 	up        int64
 	down      int64
@@ -483,6 +484,7 @@ func Run(cfg *config.AppConfig, mgr *core.Manager, client *api.Client) error {
 		cancel:        cancel,
 		activeTab:     initialTab,
 		sortByFast:    cfg.SortBySpeed,
+		autostartOn:   autostart.IsEnabled(),
 		proxies:       make(map[string]api.ProxyInfo),
 		delays:        make(map[string]int),
 		downHist:      make([]int64, 0, 32),
@@ -530,7 +532,10 @@ func (m *model) setToast(kind toastKind, text string) tea.Cmd {
 	m.toastSeq++
 	m.toastType = kind
 	m.toastText = text
-	if kind == toastBusy || kind == toastNone {
+	if kind == toastBusy {
+		return m.spin.Tick
+	}
+	if kind == toastNone {
 		return nil
 	}
 	seq := m.toastSeq
@@ -559,23 +564,7 @@ func (m model) pollConnsTickCmd() tea.Cmd {
 }
 
 func detectSysProxy() bool {
-	if runtime.GOOS != "darwin" {
-		return false
-	}
-	services, err := sysproxy.ResolveServices("")
-	if err != nil || len(services) == 0 {
-		return false
-	}
-	statuses, err := sysproxy.Status(services)
-	if err != nil {
-		return false
-	}
-	for _, st := range statuses {
-		if strings.HasPrefix(st.HTTP, "on ") || strings.HasPrefix(st.SOCKS, "on ") {
-			return true
-		}
-	}
-	return false
+	return sysproxy.FastIsEnabled()
 }
 
 func (m model) loadStateCmd() tea.Cmd {
@@ -1103,6 +1092,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinner.TickMsg:
+		if m.toastType != toastBusy && !m.busy && !m.checkingIP {
+			return m, nil
+		}
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
 		return m, cmd
@@ -1205,8 +1197,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.cfg.AutoTestOnOpen {
 				if g, ok := m.selectedGroup(); ok && len(g.All) > 0 {
 					m.busy = true
-					m.setToast(toastBusy, fmt.Sprintf("Auto-testing %d nodes in %s...", len(g.All), g.Name))
-					return m, m.testNodesCmd(g.All, g.Name, false, m.sortByFast)
+					return m, tea.Batch(m.setToast(toastBusy, fmt.Sprintf("Auto-testing %d nodes in %s...", len(g.All), g.Name)), m.testNodesCmd(g.All, g.Name, false, m.sortByFast))
 				}
 			}
 		}
@@ -1329,8 +1320,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "Q":
 			m.busy = true
-			m.setToast(toastBusy, "Powering off daemon, system proxy & menu bar...")
-			return m, m.powerOffAndQuitCmd()
+			return m, tea.Batch(m.setToast(toastBusy, "Powering off daemon, system proxy & menu bar..."), m.powerOffAndQuitCmd())
 
 		case "1":
 			m.activeTab = tabDashboard
@@ -1352,44 +1342,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.online {
 				label = "Stopping proxy daemon..."
 			}
-			m.setToast(toastBusy, label)
-			return m, m.toggleProxyDaemonCmd()
+			return m, tea.Batch(m.setToast(toastBusy, label), m.toggleProxyDaemonCmd())
 
 		case "u":
 			m.busy = true
-			m.setToast(toastBusy, "Toggling TUN mode...")
-			return m, m.toggleTunCmd()
+			return m, tea.Batch(m.setToast(toastBusy, "Toggling TUN mode..."), m.toggleTunCmd())
 
 		case "a":
 			m.busy = true
-			m.setToast(toastBusy, "Toggling Allow LAN...")
-			return m, m.toggleAllowLanCmd()
+			return m, tea.Batch(m.setToast(toastBusy, "Toggling Allow LAN..."), m.toggleAllowLanCmd())
 
 		case "s":
 			m.busy = true
-			m.setToast(toastBusy, "Toggling macOS system proxy...")
-			return m, m.toggleSysProxyCmd()
+			return m, tea.Batch(m.setToast(toastBusy, "Toggling macOS system proxy..."), m.toggleSysProxyCmd())
 
 		case "m":
 			m.busy = true
-			m.setToast(toastBusy, "Switching routing mode...")
-			return m, m.cycleModeCmd()
+			return m, tea.Batch(m.setToast(toastBusy, "Switching routing mode..."), m.cycleModeCmd())
 
 		case "i":
 			m.checkingIP = true
-			m.setToast(toastBusy, "Checking exit IP...")
-			return m, m.fetchExitIPCmd()
+			return m, tea.Batch(m.setToast(toastBusy, "Checking exit IP..."), m.fetchExitIPCmd())
 
 		case "r":
 			m.busy = true
 			m.checkingIP = true
-			m.setToast(toastBusy, "Refreshing...")
-			return m, tea.Batch(m.loadStateCmd(), m.fetchExitIPCmd())
+			return m, tea.Batch(m.setToast(toastBusy, "Refreshing..."), m.loadStateCmd(), m.fetchExitIPCmd())
 
 		case "x":
 			m.busy = true
-			m.setToast(toastBusy, "Closing active connections & flushing DNS...")
-			return m, m.closeAllConnsCmd()
+			return m, tea.Batch(m.setToast(toastBusy, "Closing active connections & flushing DNS..."), m.closeAllConnsCmd())
 		}
 
 		if m.activeTab == tabProxies {
@@ -1412,16 +1394,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "t":
 				if node, ok := m.nodeList.SelectedItem().(nodeItem); ok {
 					m.busy = true
-					m.setToast(toastBusy, fmt.Sprintf("Testing %s...", node.name))
-					return m, m.testNodesCmd([]string{node.name}, node.name, true, false)
+					return m, tea.Batch(m.setToast(toastBusy, fmt.Sprintf("Testing %s...", node.name)), m.testNodesCmd([]string{node.name}, node.name, true, false))
 				}
 				return m, nil
 
 			case "T":
 				if g, ok := m.selectedGroup(); ok && len(g.All) > 0 {
 					m.busy = true
-					m.setToast(toastBusy, fmt.Sprintf("Testing %d nodes in %s...", len(g.All), g.Name))
-					return m, m.testNodesCmd(g.All, g.Name, false, true)
+					return m, tea.Batch(m.setToast(toastBusy, fmt.Sprintf("Testing %d nodes in %s...", len(g.All), g.Name)), m.testNodesCmd(g.All, g.Name, false, true))
 				}
 				return m, nil
 
@@ -1452,16 +1432,14 @@ func (m model) activateSelectedNode() (tea.Model, tea.Cmd) {
 	}
 	if g.Type != "Selector" {
 		m.busy = true
-		m.setToast(toastBusy, fmt.Sprintf("Auto group; testing %s...", node.name))
-		return m, m.testNodesCmd([]string{node.name}, node.name, true, false)
+		return m, tea.Batch(m.setToast(toastBusy, fmt.Sprintf("Auto group; testing %s...", node.name)), m.testNodesCmd([]string{node.name}, node.name, true, false))
 	}
 	g.Now = node.name
 	m.proxies[g.Name] = g
 	m.rebuildNodeList(true)
 
 	m.busy = true
-	m.setToast(toastBusy, fmt.Sprintf("Switching %s → %s...", g.Name, node.name))
-	return m, m.selectNodeCmd(g.Name, node.name)
+	return m, tea.Batch(m.setToast(toastBusy, fmt.Sprintf("Switching %s → %s...", g.Name, node.name)), m.selectNodeCmd(g.Name, node.name))
 }
 
 func (m model) updateActiveList(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -1514,8 +1492,7 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, tea.ClearScreen
 	case zone.Get("btn:poweroff").InBounds(msg):
 		m.busy = true
-		m.setToast(toastBusy, "Powering off daemon, system proxy & menu bar...")
-		return m, m.powerOffAndQuitCmd()
+		return m, tea.Batch(m.setToast(toastBusy, "Powering off daemon, system proxy & menu bar..."), m.powerOffAndQuitCmd())
 	}
 
 	// Settings tab controls
@@ -1557,55 +1534,51 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, m.setToast(toastInfo, "✓ Auto-test on open: OFF")
 
 		case zone.Get("set:autostart").InBounds(msg):
-			if autostart.IsEnabled() {
+			if m.autostartOn {
 				if err := autostart.Disable(); err != nil {
 					return m, m.setToast(toastError, "✗ "+err.Error())
 				}
+				m.autostartOn = false
 				return m, m.setToast(toastInfo, "✓ Launch at Login: OFF")
 			}
 			if err := autostart.Enable(); err != nil {
 				return m, m.setToast(toastError, "✗ "+err.Error())
 			}
+			m.autostartOn = true
 			return m, m.setToast(toastSuccess, "✓ Launch at Login: ON")
 
 		case zone.Get("set:mode:rule").InBounds(msg):
 			m.mode = "rule"
 			m.savePrefs()
 			m.busy = true
-			m.setToast(toastBusy, "Switching mode → RULE...")
-			return m, m.setModeCmd("rule")
+			return m, tea.Batch(m.setToast(toastBusy, "Switching mode → RULE..."), m.setModeCmd("rule"))
 
 		case zone.Get("set:mode:global").InBounds(msg):
 			m.mode = "global"
 			m.savePrefs()
 			m.busy = true
-			m.setToast(toastBusy, "Switching mode → GLOBAL...")
-			return m, m.setModeCmd("global")
+			return m, tea.Batch(m.setToast(toastBusy, "Switching mode → GLOBAL..."), m.setModeCmd("global"))
 
 		case zone.Get("set:mode:direct").InBounds(msg):
 			m.mode = "direct"
 			m.savePrefs()
 			m.busy = true
-			m.setToast(toastBusy, "Switching mode → DIRECT...")
-			return m, m.setModeCmd("direct")
+			return m, tea.Batch(m.setToast(toastBusy, "Switching mode → DIRECT..."), m.setModeCmd("direct"))
 
 		case zone.Get("set:tun").InBounds(msg):
 			m.busy = true
-			m.setToast(toastBusy, "Toggling TUN mode...")
-			return m, m.toggleTunCmd()
+			return m, tea.Batch(m.setToast(toastBusy, "Toggling TUN mode..."), m.toggleTunCmd())
 
 		case zone.Get("set:sysproxy").InBounds(msg):
 			m.busy = true
-			m.setToast(toastBusy, "Toggling macOS system proxy...")
-			return m, m.toggleSysProxyCmd()
+			return m, tea.Batch(m.setToast(toastBusy, "Toggling macOS system proxy..."), m.toggleSysProxyCmd())
 
 		case zone.Get("set:lan").InBounds(msg):
 			cmd := m.toggleAllowLanCmd()
 			m.allowLan = !m.allowLan
 			m.savePrefs()
 			m.busy = true
-			m.setToast(toastBusy, "Toggling Allow LAN...")
-			return m, cmd
+			return m, tea.Batch(m.setToast(toastBusy, "Toggling Allow LAN..."), cmd)
 		}
 		return m, nil
 	}
@@ -1619,53 +1592,43 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			if m.online {
 				label = "Stopping proxy daemon..."
 			}
-			m.setToast(toastBusy, label)
-			return m, m.toggleProxyDaemonCmd()
+			return m, tea.Batch(m.setToast(toastBusy, label), m.toggleProxyDaemonCmd())
 
 		case zone.Get("ctl:mode:rule").InBounds(msg):
 			m.busy = true
-			m.setToast(toastBusy, "Switching mode → RULE...")
-			return m, m.setModeCmd("rule")
+			return m, tea.Batch(m.setToast(toastBusy, "Switching mode → RULE..."), m.setModeCmd("rule"))
 
 		case zone.Get("ctl:mode:global").InBounds(msg):
 			m.busy = true
-			m.setToast(toastBusy, "Switching mode → GLOBAL...")
-			return m, m.setModeCmd("global")
+			return m, tea.Batch(m.setToast(toastBusy, "Switching mode → GLOBAL..."), m.setModeCmd("global"))
 
 		case zone.Get("ctl:mode:direct").InBounds(msg):
 			m.busy = true
-			m.setToast(toastBusy, "Switching mode → DIRECT...")
-			return m, m.setModeCmd("direct")
+			return m, tea.Batch(m.setToast(toastBusy, "Switching mode → DIRECT..."), m.setModeCmd("direct"))
 
 		case zone.Get("ctl:tun").InBounds(msg):
 			m.busy = true
-			m.setToast(toastBusy, "Toggling TUN mode...")
-			return m, m.toggleTunCmd()
+			return m, tea.Batch(m.setToast(toastBusy, "Toggling TUN mode..."), m.toggleTunCmd())
 
 		case zone.Get("ctl:sysproxy").InBounds(msg):
 			m.busy = true
-			m.setToast(toastBusy, "Toggling macOS system proxy...")
-			return m, m.toggleSysProxyCmd()
+			return m, tea.Batch(m.setToast(toastBusy, "Toggling macOS system proxy..."), m.toggleSysProxyCmd())
 
 		case zone.Get("ctl:lan").InBounds(msg):
 			m.busy = true
-			m.setToast(toastBusy, "Toggling Allow LAN...")
-			return m, m.toggleAllowLanCmd()
+			return m, tea.Batch(m.setToast(toastBusy, "Toggling Allow LAN..."), m.toggleAllowLanCmd())
 
 		case zone.Get("ctl:updatesub").InBounds(msg):
 			m.busy = true
-			m.setToast(toastBusy, "Updating subscription...")
-			return m, m.updateSubCmd()
+			return m, tea.Batch(m.setToast(toastBusy, "Updating subscription..."), m.updateSubCmd())
 
 		case zone.Get("ctl:checkip").InBounds(msg):
 			m.checkingIP = true
-			m.setToast(toastBusy, "Checking exit IP...")
-			return m, m.fetchExitIPCmd()
+			return m, tea.Batch(m.setToast(toastBusy, "Checking exit IP..."), m.fetchExitIPCmd())
 
 		case zone.Get("ctl:closeconns").InBounds(msg):
 			m.busy = true
-			m.setToast(toastBusy, "Closing active connections & flushing DNS...")
-			return m, m.closeAllConnsCmd()
+			return m, tea.Batch(m.setToast(toastBusy, "Closing active connections & flushing DNS..."), m.closeAllConnsCmd())
 		}
 
 		for i, item := range m.groupList.Items() {
@@ -1697,16 +1660,14 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	case zone.Get("btn:testnode").InBounds(msg):
 		if node, ok := m.nodeList.SelectedItem().(nodeItem); ok {
 			m.busy = true
-			m.setToast(toastBusy, fmt.Sprintf("Testing %s...", node.name))
-			return m, m.testNodesCmd([]string{node.name}, node.name, true, false)
+			return m, tea.Batch(m.setToast(toastBusy, fmt.Sprintf("Testing %s...", node.name)), m.testNodesCmd([]string{node.name}, node.name, true, false))
 		}
 		return m, nil
 
 	case zone.Get("btn:testgroup").InBounds(msg):
 		if g, ok := m.selectedGroup(); ok && len(g.All) > 0 {
 			m.busy = true
-			m.setToast(toastBusy, fmt.Sprintf("Testing %d nodes in %s...", len(g.All), g.Name))
-			return m, m.testNodesCmd(g.All, g.Name, false, true)
+			return m, tea.Batch(m.setToast(toastBusy, fmt.Sprintf("Testing %d nodes in %s...", len(g.All), g.Name)), m.testNodesCmd(g.All, g.Name, false, true))
 		}
 		return m, nil
 
@@ -1881,7 +1842,7 @@ func (m model) renderSettings(totalW, bodyH int) string {
 	}
 
 	autostartSwitch := zone.Mark("set:autostart", switchOffStyle.Render("○ OFF"))
-	if autostart.IsEnabled() {
+	if m.autostartOn {
 		autostartSwitch = zone.Mark("set:autostart", switchOnStyle.Render("● ON"))
 	}
 
@@ -2208,12 +2169,20 @@ func (m model) renderDashboard(totalW, bodyH int) string {
 	return lipgloss.JoinVertical(lipgloss.Left, topRow, botRow)
 }
 
+var cleanDisplayCache sync.Map
+
 // cleanDisplay normalizes strings for deterministic terminal cell-width rendering:
 //   1. Converts 2-rune Regional Indicator flag emojis (🇯🇵, 🇸🇬, 🇺🇸, 🇹🇼, etc.) into crisp
 //      ASCII country tags ([JP], [SG], [US], [TW]) so terminals that allocate 4 cells per
 //      flag pair never overflow lipgloss's 2-cell calculation or render tofu boxes (☒).
 //   2. Strips Variation Selectors (U+FE0F / U+FE0E) and zero-width joiners (U+200D).
 func cleanDisplay(s string) string {
+	if s == "" {
+		return ""
+	}
+	if cached, ok := cleanDisplayCache.Load(s); ok {
+		return cached.(string)
+	}
 	runes := []rune(s)
 	var b strings.Builder
 	b.Grow(len(s))
@@ -2237,7 +2206,9 @@ func cleanDisplay(s string) string {
 		}
 		b.WriteRune(r)
 	}
-	return b.String()
+	out := b.String()
+	cleanDisplayCache.Store(s, out)
+	return out
 }
 
 func kvLine(k, v string, maxW int) string {
