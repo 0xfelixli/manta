@@ -407,6 +407,27 @@ func BuildRuntimeConfig(p Paths, cfg *AppConfig) error {
 			dnsMap["nameserver"] = []string{"https://223.5.5.5/dns-query", "https://1.12.12.12/dns-query", "223.5.5.5"}
 		}
 		doc["dns"] = dnsMap
+
+		if _, exists := doc["sniffer"]; !exists {
+			doc["sniffer"] = map[string]any{
+				"enable":               true,
+				"force-dns-mapping":    true,
+				"parse-pure-ip":        true,
+				"override-destination": true,
+				"sniff": map[string]any{
+					"HTTP": map[string]any{
+						"ports":                []string{"80", "8080-8880"},
+						"override-destination": true,
+					},
+					"TLS": map[string]any{
+						"ports": []string{"443", "8443"},
+					},
+					"QUIC": map[string]any{
+						"ports": []string{"443", "8443"},
+					},
+				},
+			}
+		}
 	} else {
 		delete(doc, "tun")
 	}

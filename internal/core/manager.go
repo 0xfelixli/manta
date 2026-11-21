@@ -120,6 +120,9 @@ func (m *Manager) Start() (int, error) {
 	for time.Now().Before(deadline) {
 		if live, err := client.GetConfigs(); err == nil {
 			if !m.Cfg.TunEnabled || live.Tun.Enable {
+				if m.Cfg.TunEnabled {
+					sysproxy.EnsureTunDNS()
+				}
 				return pid, nil
 			}
 		}
@@ -176,25 +179,20 @@ func (m *Manager) Stop() error {
 	return nil
 }
 
-// DisableSysProxyQuiet turns off macOS system proxy if currently enabled.
+// DisableSysProxyQuiet turns off macOS system proxy if currently enabled and restores DHCP DNS.
 func (m *Manager) DisableSysProxyQuiet() {
 	if runtime.GOOS != "darwin" {
+		return
+	}
+	sysproxy.RestoreDefaultDNS()
+	if !sysproxy.FastIsEnabled() {
 		return
 	}
 	services, err := sysproxy.ResolveServices("")
 	if err != nil || len(services) == 0 {
 		return
 	}
-	statuses, err := sysproxy.Status(services)
-	if err != nil {
-		return
-	}
-	for _, st := range statuses {
-		if strings.HasPrefix(st.HTTP, "on ") || strings.HasPrefix(st.SOCKS, "on ") {
-			_ = sysproxy.Disable(services)
-			return
-		}
-	}
+	_ = sysproxy.Disable(services)
 }
 
 // StopMenubar terminates the background macOS menu bar process if running.

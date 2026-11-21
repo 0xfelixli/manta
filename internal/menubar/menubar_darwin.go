@@ -619,6 +619,7 @@ func Run(cfg *config.AppConfig, mgr *core.Manager, client *api.Client) error {
 					go func() {
 						if !wantTun {
 							_ = client.SetTun(false)
+							sysproxy.RestoreDefaultDNS()
 							if mgr != nil {
 								cfg.TunEnabled = false
 								_ = config.Save(mgr.Paths, cfg)
@@ -630,6 +631,7 @@ func Run(cfg *config.AppConfig, mgr *core.Manager, client *api.Client) error {
 						if isOnline {
 							_ = client.SetTun(true)
 							if live, err := client.GetConfigs(); err == nil && live.Tun.Enable {
+								sysproxy.EnsureTunDNS()
 								if mgr != nil {
 									cfg.TunEnabled = true
 									_ = config.Save(mgr.Paths, cfg)
@@ -640,6 +642,7 @@ func Run(cfg *config.AppConfig, mgr *core.Manager, client *api.Client) error {
 						}
 						if mgr != nil {
 							_, _ = mgr.StartTunElevated()
+							sysproxy.EnsureTunDNS()
 						}
 						refreshState()
 						refreshExitIP()

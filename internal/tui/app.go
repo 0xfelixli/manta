@@ -703,6 +703,7 @@ func (m model) toggleTunCmd() tea.Cmd {
 			if err := m.client.SetTun(false); err != nil {
 				return actionResultMsg{err: err}
 			}
+			sysproxy.RestoreDefaultDNS()
 			if m.mgr != nil && m.cfg != nil {
 				m.cfg.TunEnabled = false
 				_ = config.Save(m.mgr.Paths, m.cfg)
@@ -714,6 +715,7 @@ func (m model) toggleTunCmd() tea.Cmd {
 		if m.online {
 			_ = m.client.SetTun(true)
 			if live, err := m.client.GetConfigs(); err == nil && live.Tun.Enable {
+				sysproxy.EnsureTunDNS()
 				if m.mgr != nil && m.cfg != nil {
 					m.cfg.TunEnabled = true
 					_ = config.Save(m.mgr.Paths, m.cfg)

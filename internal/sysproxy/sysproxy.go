@@ -210,6 +210,57 @@ func Disable(services []string) error {
 	return nil
 }
 
+// EnsureTunDNS ensures the active macOS network services use public IPv4 DNS servers
+// (223.5.5.5 / 119.29.29.29) instead of LAN DHCP router addresses (192.168.x.1 / fe80::1).
+// LAN router addresses stay on the physical en0/en1 link and bypass the utun routing table,
+// whereas 223.5.5.5 is routed into utun and intercepted by mihomo's Fake-IP dns-hijack
+// (while still resolving normally if manta is ever force-killed).
+func EnsureTunDNS() {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	services, err := ResolveServices("")
+	if err != nil {
+		return
+	}
+	for _, svc := range services {
+		out, err := runNetworkSetup("-getdnsservers", svc)
+		if err != nil {
+			continue
+		}
+		// Only override when macOS is using DHCP default ("There aren't any DNS Servers set...")
+		// or a local router IP (192.168.x.x / 10.x.x.x / fe80::).
+		trimmed := strings.TrimSpace(out)
+		if strings.Contains(trimmed, "aren't any DNS Servers") ||
+			strings.HasPrefix(trimmed, "192.168.") ||
+			strings.HasPrefix(trimmed, "10.") ||
+			strings.HasPrefix(trimmed, "fe80:") {
+			_, _ = runNetworkSetup("-setdnsservers", svc, "223.5.5.5", "119.29.29.29")
+		}
+	}
+	_ = exec.Command("dscacheutil", "-flushcache").Run()
+}
+
+// RestoreDefaultDNS restores DHCP DNS ("Empty") on services where EnsureTunDNS set 223.5.5.5.
+func RestoreDefaultDNS() {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	services, err := ResolveServices("")
+	if err != nil {
+		return
+	}
+	for _, svc := range services {
+		out, err := runNetworkSetup("-getdnsservers", svc)
+		if err != nil {
+			continue
+		}
+		if strings.Contains(out, "223.5.5.5") && strings.Contains(out, "119.29.29.29") {
+			_, _ = runNetworkSetup("-setdnsservers", svc, "Empty")
+		}
+	}
+}
+
 // Status inspects HTTP, HTTPS, and SOCKS5 proxy settings for the given macOS network services.
 func Status(services []string) ([]ServiceStatus, error) {
 	if err := ensureDarwin(); err != nil {
